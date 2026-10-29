@@ -1,0 +1,452 @@
+<div align="center">
+  <img width="100" height="100" alt="FalkorDB Logo Square B" src="https://github.com/user-attachments/assets/ec67e5e3-a060-405d-b229-1fe2badcf8ad" />
+</div>
+<div align="center">
+  <h1>FalkorDB</h1>
+  <h2>Ultra-fast, Multi-tenant Graph Database</h2>
+  <h3>Powering Generative AI, Agent Memory, Cloud Security, and Fraud Detection</h3>
+<a href="https://trendshift.io/repositories/14787" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/14787" alt="FalkorDB%2FFalkorDB | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+</div>
+<div align="center">
+  <a href="https://app.falkordb.cloud/signup">
+    <img src="https://img.shields.io/badge/Try%20Free-FalkorDB%20Cloud-FF8101?labelColor=FDE900&style=for-the-badge" alt="Try Free" />
+  </a><br>
+  <a href="https://discord.com/invite/TJ4SaPTptf" rel="nofollow">
+    <img src="https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white" alt="Discord" />
+  </a>
+  <a href="https://hub.docker.com/r/falkordb/falkordb/">
+    <img src="https://img.shields.io/docker/pulls/falkordb/falkordb?label=Docker" alt="Dockerhub" />
+  </a>
+  <a href="https://codecov.io/gh/FalkorDB/FalkorDB">
+    <img src="https://codecov.io/gh/FalkorDB/FalkorDB/branch/main/graph/badge.svg?token=0G4HBEJMW0" alt="codecov" />
+  </a>
+  <a href="https://github.com/FalkorDB/FalkorDB/actions/workflows/rust-push.yml">
+    <img src="https://github.com/FalkorDB/FalkorDB/actions/workflows/rust-push.yml/badge.svg?branch=main" alt="Rust" />
+  </a>
+  <a href="https://github.com/FalkorDB/FalkorDB/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-Server_Side_Public_License-green" alt="license" />
+  </a>
+</div>
+
+<div align="center">
+
+![FalkorDB GitHub Repo - Video - 640x365](https://github.com/user-attachments/assets/131867d4-fa2b-41f8-ac72-5c5f6eaf4e12)
+
+</div>
+
+## UNIQUE FEATURES
+
+Our goal is to build a high-performance Knowledge Graph tailored for Large Language Models (LLMs), prioritizing exceptionally low latency to ensure fast and efficient information delivery through our Graph Database.
+
+🆕 [FalkorDB](https://www.falkordb.com/) is the first **queryable [Property Graph](https://github.com/opencypher/openCypher/blob/master/docs/property-graph-model.adoc) database to leverage sparse matrices** for representing the [adjacency matrix](https://en.wikipedia.org/wiki/Adjacency_matrix) in graphs and [linear algebra](https://en.wikipedia.org/wiki/Adjacency_matrix) for querying.
+
+### Key Features
+
+* **Sparse Matrix Representation**: Utilizes sparse matrices to represent adjacency matrices, optimizing storage and performance.
+
+
+* **Linear Algebra Querying**: Employs linear algebra for query execution, enhancing computational efficiency.
+
+
+* **Property Graph Model Compliance**: Supports nodes and relationships with attributes, adhering to the Property Graph Model.
+
+
+* **OpenCypher Support:** Compatible with [OpenCypher](https://github.com/opencypher/openCypher/blob/master/docs/property-graph-model.adoc) query language, including proprietary extensions for advanced querying capabilities.
+
+>Explore FalkorDB in action by visiting the [Demos](https://github.com/FalkorDB/FalkorDB/tree/master/demo).
+
+## GET STARTED
+
+### Step 1
+
+To quickly try out FalkorDB, launch an instance using docker:
+
+```
+docker run -p 6379:6379 -p 3000:3000 -it --rm -v ./data:/var/lib/falkordb/data falkordb/falkordb
+```
+
+### Step 2
+
+Then, open your browser and navigate to `http://localhost:3000`.
+
+
+You can also interact with FalkorDB using any of the supported [Client Libraries](https://docs.falkordb.com/clients.html)
+
+### MotoGP League Example
+
+In this example, we'll use the [FalkorDB Python client](https://pypi.org/project/FalkorDB/) to create a small graph representing a subset of motorcycle riders and teams participating in the MotoGP league. After creating the graph, we'll query the data to explore its structure and relationships.
+
+```python
+from falkordb import FalkorDB
+
+# Connect to FalkorDB
+db = FalkorDB(host='localhost', port=6379)
+
+# Create the 'MotoGP' graph
+g = db.select_graph('MotoGP')
+g.query("""CREATE (:Rider {name:'Valentino Rossi'})-[:rides]->(:Team {name:'Yamaha'}),
+                  (:Rider {name:'Dani Pedrosa'})-[:rides]->(:Team {name:'Honda'}),
+                  (:Rider {name:'Andrea Dovizioso'})-[:rides]->(:Team {name:'Ducati'})""")
+
+# Query which riders represents Yamaha?
+res = g.query("""MATCH (r:Rider)-[:rides]->(t:Team)
+                 WHERE t.name = 'Yamaha'
+                 RETURN r.name""")
+
+for row in res.result_set:
+	print(row[0])
+
+# Prints: "Valentino Rossi"
+
+# Query how many riders represent team Ducati ?
+res = g.query("""MATCH (r:Rider)-[:rides]->(t:Team {name:'Ducati'})
+                 RETURN count(r)""")
+
+print(res.result_set[0][0])
+# Prints: 1
+```
+
+## USING FALKORDB
+
+You can call FalkorDB's commands from any Redis client. Here are several methods:
+
+### With `redis-cli`
+
+```sh
+$ redis-cli
+127.0.0.1:6379> GRAPH.QUERY social "CREATE (:person {name: 'roi', age: 33, gender: 'male', status: 'married'})"
+```
+
+### With any other client
+
+You can interact with FalkorDB using your client's ability to send raw Redis commands.
+
+>Note: Depending on your client of choice, the exact method for doing that may vary.
+
+#### Example: Using FalkorDB with a Python client
+
+This code snippet shows how to use FalkorDB with from Python using [falkordb-py](https://github.com/FalkorDB/falkordb-py):
+
+```Python
+from falkordb import FalkorDB
+
+# Connect to FalkorDB
+db = FalkorDB(host='localhost', port=6379)
+
+# Select the social graph
+g = db.select_graph('social')
+
+reply = g.query("CREATE (:person {name:'roi', age:33, gender:'male', status:'married'})")
+```
+
+## CLIENT LIBRARIES
+
+>Note: Some languages have client libraries that provide support for FalkorDB's commands:
+
+### Official Clients
+
+
+| Project                                                   | Language   | License | Author                                      | Stars                                                             | Package | Comment    |
+| --------------------------------------------------------- | ---------- | ------- | ------------------------------------------- | ----------------------------------------------------------------- | ------- | ---------- |
+| [jfalkordb][jfalkordb-url] | Java | BSD | [FalkorDB][falkordb-url] | [![jfalkordb-stars]][jfalkordb-url] | [Maven][jfalkordb-package]||
+| [falkordb-py][falkordb-py-url] | Python | MIT | [FalkorDB][falkordb-url] | [![falkordb-py-stars]][falkordb-py-url] | [pypi][falkordb-py-package]||
+| [falkordb-ts][falkordb-ts-url] | Node.JS | MIT | [FalkorDB][falkordb-url] | [![falkordb-ts-stars]][falkordb-ts-url] | [npm][falkordb-ts-package]||
+| [falkordb-rs][falkordb-rs-url] | Rust | MIT | [FalkorDB][falkordb-url] | [![falkordb-rs-stars]][falkordb-rs-url] | [Crate][falkordb-rs-package]||
+| [falkordb-go][falkordb-go-url] | Go | BSD | [FalkorDB][falkordb-url] | [![falkordb-go-stars]][falkordb-go-url] | [GitHub][falkordb-go-url]||
+| [NFalkorDB][nfalkordb-url]  |  C# | Apache-2.0 | [FalkorDB][falkordb-url] | [![nfalkordb-stars]][nfalkordb-url] | [nuget][nfalkordb-package] | |
+
+
+### Additional Clients
+
+| Project                                                   | Language   | License | Author                                      | Stars                                                             | Package | Comment    |
+| --------------------------------------------------------- | ---------- | ------- | ------------------------------------------- | ----------------------------------------------------------------- | ------- | ---------- |
+| [nredisstack][nredisstack-url] | .NET | MIT | [Redis][redis-url] | [![nredisstack-stars]][nredisstack-url] | [nuget][nredisstack-package]||
+| [redisgraph-rb][redisgraph-rb-url]                        | Ruby       | BSD     | [Redis][redisgraph-rb-author]          | [![redisgraph-rb-stars]][redisgraph-rb-url]                       | [GitHub][redisgraph-rb-url] ||
+| [redgraph][redgraph-url]                                  | Ruby       | MIT     | [pzac][redgraph-author]                | [![redgraph-stars]][redgraph-url]                                 | [GitHub][redgraph-url] ||
+| [redisgraph-go][redisgraph-go-url]                        | Go         | BSD     | [Redis][redisgraph-go-author]          | [![redisgraph-go-stars]][redisgraph-go-url]                       | [GitHub][redisgraph-go-url]||
+| [rueidis][rueidis-url]                                    | Go         | Apache 2.0 | [Rueian][rueidis-author]          | [![rueidis-stars]][rueidis-url]                       | [GitHub][rueidis-url] ||
+| [ioredisgraph][ioredisgraph-url]                          | JavaScript | ISC     | [Jonah][ioredisgraph-author]                | [![ioredisgraph-stars]][ioredisgraph-url]                         | [GitHub][ioredisgraph-url] ||
+| [@hydre/rgraph][rgraph-url]                               | JavaScript | MIT     | [Sceat][rgraph-author]                      | [![rgraph-stars]][rgraph-url]                                     | [GitHub][rgraph-url] ||
+| [php-redis-graph][php-redis-graph-url]                    | PHP        | MIT     | [KJDev][php-redis-graph-author]             | [![php-redis-graph-stars]][php-redis-graph-url]                   | [GitHub][php-redis-graph-url] ||
+| [redisgraph_php][redisgraph_php-url]                      | PHP        | MIT     | [jpbourbon][redisgraph_php-author]          | [![redisgraph_php-stars]][redisgraph_php-url]                     | [GitHub][redisgraph_php-url] ||
+| [redisgraph-ex][redisgraph-ex-url]                        | Elixir     | MIT     | [crflynn][redisgraph-ex-author]             | [![redisgraph-ex-stars]][redisgraph-ex-url]                       | [GitHub][redisgraph-ex-url] ||
+| [redisgraph-rs][redisgraph-rs-url]                        | Rust       | MIT     | [malte-v][redisgraph-rs-author]             | [![redisgraph-rs-stars]][redisgraph-rs-url]                       | [GitHub][redisgraph-rs-url] ||
+| [redis_graph][redis_graph-url]                            | Rust       | BSD     | [tompro][redis_graph-author]                | [![redis_graph-stars]][redis_graph-url]                           | [GitHub][redis_graph-url] ||
+| [rustis][rustis-url]                                     | Rust       | MIT          | [Dahomey Technologies][rustis-author]       | [![rustis-stars]][rustis-url]    | [Crate](https://crates.io/crates/rustis) | [Documentation](https://docs.rs/rustis/latest/rustis/commands/trait.GraphCommands.html) |
+| [NRedisGraph][NRedisGraph-url]                            | C#         | BSD     | [tombatron][NRedisGraph-author]             | [![NRedisGraph-stars]][NRedisGraph-url]                           | [GitHub][NRedisGraph-url] ||
+| [RedisGraph.jl][RedisGraph.jl-url]                        | Julia      | MIT     | [xyxel][RedisGraph.jl-author]               | [![RedisGraph.jl-stars]][RedisGraph.jl-url]                       | [GitHub][RedisGraph.jl-url] ||
+
+[redis-url]: https://redis.com
+[falkordb-url]: https://www.falkordb.com
+
+[falkordb-py-url]: http://github.com/falkorDB/falkordb-py
+[falkordb-py-stars]: https://img.shields.io/github/stars/falkorDB/falkordb-py.svg?style=social&amp;label=Star&amp;maxAge=2592000
+[falkordb-py-package]: https://pypi.org/project/FalkorDB
+
+[jfalkordb-url]: https://github.com/falkordb/jfalkordb
+[jfalkordb-stars]: https://img.shields.io/github/stars/falkordb/jfalkordb.svg?style=social&amp;label=Star&amp;maxAge=2592000
+[jfalkordb-package]: https://search.maven.org/artifact/com.falkordb/jfalkordb
+
+[nfalkordb-url]: https://github.com/falkordb/NFalkorDB
+[nfalkordb-stars]: https://img.shields.io/github/stars/falkordb/nfalkordb.svg?style=social&label=Star&maxAge=2592000
+[nfalkordb-package]: https://www.nuget.org/packages/NFalkorDB
+
+[nredisstack-url]: https://github.com/redis/nredisstack
+[nredisstack-stars]: https://img.shields.io/github/stars/redis/nredisstack.svg?style=social&amp;label=Star&amp;maxAge=2592000
+[nredisstack-package]: https://www.nuget.org/packages/nredisstack/
+
+[falkordb-ts-url]: https://github.com/falkordb/falkordb-ts
+[falkordb-ts-stars]: https://img.shields.io/github/stars/falkordb/falkordb-ts.svg?style=social&amp;label=Star&amp;maxAge=2592000
+[falkordb-ts-package]: https://www.npmjs.com/package/falkordb
+
+[falkordb-rs-url]: https://github.com/falkordb/falkordb-rs
+[falkordb-rs-stars]: https://img.shields.io/github/stars/falkordb/falkordb-rs.svg?style=social&amp;label=Star&amp;maxAge=2592000
+[falkordb-rs-package]: https://crates.io/crates/falkordb
+
+[falkordb-go-url]: https://github.com/falkordb/falkordb-go
+[falkordb-go-stars]: https://img.shields.io/github/stars/falkordb/falkordb-go.svg?style=social&amp;label=Star&amp;maxAge=2592000
+[falkordb-go-package]: https://github.com/falkordb/falkordb-go
+
+[redisgraph-rb-author]: https://redislabs.com
+[redisgraph-rb-url]: https://github.com/RedisGraph/redisgraph-rb
+[redisgraph-rb-stars]: https://img.shields.io/github/stars/RedisGraph/redisgraph-rb.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[redgraph-author]: https://github.com/pzac
+[redgraph-url]: https://github.com/pzac/redgraph
+[redgraph-stars]: https://img.shields.io/github/stars/pzac/redgraph.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[redisgraph-go-author]: https://redislabs.com
+[redisgraph-go-url]: https://github.com/RedisGraph/redisgraph-go
+[redisgraph-go-stars]: https://img.shields.io/github/stars/RedisGraph/redisgraph-go.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[rueidis-url]: https://github.com/rueian/rueidis
+[rueidis-author]: https://github.com/rueian
+[rueidis-stars]: https://img.shields.io/github/stars/rueian/rueidis.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+
+[rgraph-author]: https://github.com/Sceat
+[rgraph-url]: https://github.com/HydreIO/rgraph
+[rgraph-stars]: https://img.shields.io/github/stars/HydreIO/rgraph.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[ioredisgraph-author]: https://github.com/Jonahss
+[ioredisgraph-url]: https://github.com/Jonahss/ioredisgraph
+[ioredisgraph-stars]: https://img.shields.io/github/stars/Jonahss/ioredisgraph.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[php-redis-graph-author]: https://github.com/kjdev
+[php-redis-graph-url]: https://github.com/kjdev/php-redis-graph
+[php-redis-graph-stars]: https://img.shields.io/github/stars/kjdev/php-redis-graph.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[redisgraph_php-author]: https://github.com/jpbourbon
+[redisgraph_php-url]: https://github.com/jpbourbon/redisgraph_php
+[redisgraph_php-stars]: https://img.shields.io/github/stars/jpbourbon/redisgraph_php.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[redislabs-redisgraph-php-author]: https://github.com/mkorkmaz
+[redislabs-redisgraph-php-url]: https://github.com/mkorkmaz/redislabs-redisgraph-php
+[redislabs-redisgraph-php-stars]: https://img.shields.io/github/stars/mkorkmaz/redislabs-redisgraph-php.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[redisgraph-ex-author]: https://github.com/crflynn
+[redisgraph-ex-url]: https://github.com/crflynn/redisgraph-ex
+[redisgraph-ex-stars]: https://img.shields.io/github/stars/crflynn/redisgraph-ex.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[redisgraph-rs-author]: https://github.com/malte-v
+[redisgraph-rs-url]: https://github.com/malte-v/redisgraph-rs
+[redisgraph-rs-stars]: https://img.shields.io/github/stars/malte-v/redisgraph-rs.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[redis_graph-author]: https://github.com/tompro
+[redis_graph-url]: https://github.com/tompro/redis_graph
+[redis_graph-stars]: https://img.shields.io/github/stars/tompro/redis_graph.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[NRedisGraph-author]: https://github.com/tombatron
+[NRedisGraph-url]: https://github.com/tombatron/NRedisGraph
+[NRedisGraph-stars]: https://img.shields.io/github/stars/tombatron/NRedisGraph.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[RedisGraphDotNet.Client-author]: https://github.com/Sgawrys
+[RedisGraphDotNet.Client-url]: https://github.com/Sgawrys/RedisGraphDotNet.Client
+[RedisGraphDotNet.Client-stars]: https://img.shields.io/github/stars/Sgawrys/RedisGraphDotNet.Client.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[RedisGraph.jl-author]: https://github.com/xyxel
+[RedisGraph.jl-url]: https://github.com/xyxel/RedisGraph.jl
+[RedisGraph.jl-stars]: https://img.shields.io/github/stars/xyxel/RedisGraph.jl.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+[rustis-url]: https://github.com/dahomey-technologies/rustis
+[rustis-author]: https://github.com/dahomey-technologies
+[rustis-stars]: https://img.shields.io/github/stars/dahomey-technologies/rustis.svg?style=social&amp;label=Star&amp;maxAge=2592000
+
+## DOCUMENTATION
+
+[Official Docs](https://docs.falkordb.com/) | [Clients](https://docs.falkordb.com/clients.html) | [Commands](https://docs.falkordb.com/commands/) | 📊 [Latest Performance Benchmarks](https://benchmark.falkordb.com/)
+
+### Community and Support
+
+* **Discussions**: Join our community discussions on [GitHub Discussions](https://github.com/FalkorDB/FalkorDB/discussions) to ask questions, share ideas, and connect with other users.
+
+* **Contributing**: We welcome contributions! See the [Developer Guide](#developer-guide) below to build FalkorDB from source and run the test suites.
+
+* **License**: This project is licensed under the Server Side Public License v1 (SSPLv1). See the [LICENSE](LICENSE) file for details.
+
+## Developer Guide
+
+This repository is the Rust implementation of FalkorDB. It builds the `falkordb` Redis
+module (`libfalkordb.{so,dylib}`) from Rust, using GraphBLAS sparse matrices for graph
+storage and traversal.
+
+### Quick Start with Dev Container (Recommended)
+
+The easiest way to get started is using the development container, which includes all dependencies pre-installed:
+
+1. Install [Docker](https://docs.docker.com/get-docker/) and [VS Code](https://code.visualstudio.com/)
+2. Install the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+3. Open this project in VS Code
+4. Click "Reopen in Container" when prompted (or press F1 and select "Dev Containers: Reopen in Container")
+5. Wait for the container to build (first time takes ~10-15 minutes)
+6. Start developing! All dependencies are ready to use.
+
+See [.devcontainer/README.md](.devcontainer/README.md) for more details.
+
+### Manual Setup
+
+If you prefer to set up the environment manually:
+
+#### Build
+
+```
+cargo build
+```
+
+#### Dependencies:
+
+GraphBLAS, LAGraph, and RediSearch must be built and installed before building this project.
+
+##### Toolchain prerequisites
+
+| Host | Compiler | OpenMP runtime |
+| --- | --- | --- |
+| macOS | `brew install llvm` (provides `clang` with OpenMP support) | `brew install libomp` |
+| Linux | `clang-23` (e.g. from [apt.llvm.org](https://apt.llvm.org/)) | `apt install libomp-23-dev` |
+
+Local builds use whatever OpenMP package is on the system — `build/libomp.sh`
+is **not** required for local development. It is only invoked by the Docker
+toolchain image (`build/Dockerfile`) to produce `/opt/libomp/lib/libomp.a`,
+which lets the published `libfalkordb.{so,dylib}` embed libomp statically
+and have no `libomp.so.5` / `libgomp.so.1` / `libomp.dylib` runtime
+dependency. A locally-built artifact will dynamically link the system
+libomp instead — fine for dev, but CI/Docker is the source of truth for
+the self-contained image.
+
+If you do want a self-contained local artifact (e.g. to mirror the Docker
+build), run `build/libomp.sh` with a writable `PREFIX` and point
+`graph/build.rs` at it via `LIBOMP_PREFIX`:
+
+```bash
+CC=$(brew --prefix llvm)/bin/clang PREFIX=$HOME/libomp ./build/libomp.sh
+LIBOMP_PREFIX=$HOME/libomp cargo build
+```
+
+The script auto-detects the libomp source release from `${CC:-clang}
+--version`, so it stays ABI-matched to your compiler with no manual
+version arg. In Docker the same auto-detection runs against
+`clang-${CLANG_MAJOR}`, eliminating the prior drift risk between the
+apt-installed clang and a hand-pinned `LLVMORG_VERSION`.
+
+##### Building the native dependencies
+
+[GraphBLAS](https://github.com/DrTimothyAldenDavis/GraphBLAS.git),
+[LAGraph](https://github.com/GraphBLAS/LAGraph.git) and
+[RediSearch](https://github.com/FalkorDB/RediSearch.git) are git submodules
+under `deps/`, built by the `native-deps` crate. **git owns those checkouts** —
+`native-deps` only builds what is there, so populate them first.
+
+On macOS, point the build at Homebrew clang first: the system clang has no
+OpenMP, and GraphBLAS would build single-threaded without saying so.
+
+```bash
+export CC=$(brew --prefix llvm)/bin/clang
+export CXX=$(brew --prefix llvm)/bin/clang++
+```
+
+```bash
+git submodule update --init --recursive
+cargo build   # graph/build.rs calls native-deps; nothing else to run
+```
+
+(`git clone --recurse-submodules` does the first step for you.)
+
+`cargo build` builds any missing dependency automatically, so the explicit step
+below is only needed if you want to build them ahead of time or inspect the
+result:
+
+```bash
+cargo run --manifest-path native-deps/Cargo.toml
+```
+
+###### The artifact cache
+
+Results are cached at
+`${XDG_CACHE_HOME:-$HOME/.cache}/falkordb/native-deps/<dep>/<key>/`
+(`$FALKORDB_DEPS_CACHE` overrides the root). The key covers everything the artifacts are ABI-tied to:
+the submodule revision, the `GB_control` patch, the vendored PreJIT kernels, the
+recipe sources, `$CC`/`$CXX --version`, the target triple and the
+OpenMP/sanitizer flavour. Worktrees therefore share archives, and a compiler
+bump can never yield a stale-ABI cache hit.
+
+`$FALKORDB_NATIVE_DEPS_PREBUILT` names extra read-only roots to search first;
+the Docker images use it to expose the artifacts their dep stages built.
+
+###### Bumping a dependency
+
+Move the gitlink the ordinary way, then regenerate the lock file:
+
+```bash
+git -C deps/RediSearch checkout <sha>
+git add deps/RediSearch
+cargo run --manifest-path native-deps/Cargo.toml -- lock
+```
+
+`deps/native-deps.lock` mirrors the gitlinks as a plain file, because a Docker
+build context has no `.git` for the dep stages to read. CI enforces that the two
+agree via `lock --check`.
+
+
+- pytest - create virtualenv and install tests/requirements.txt
+
+The virtual environment should be activated before running tests.
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r tests/requirements.txt
+```
+
+### Testing
+
+- run unit tests with `cargo test -p graph`
+
+- run e2e and function tests with `pytest tests/test_e2e.py tests/test_functions.py -vv`
+
+- run MVCC and concurrency tests with `pytest tests/test_mvcc.py tests/test_concurrency.py -vv`
+
+- run flow tests with `./flow.sh`
+
+- run tck tests with `pytest tests/tck/test_tck.py -s`
+
+There is an option to run only part of the TCK tests and stop on the first fail
+
+```bash
+TCK_INCLUDE=tests/tck/features/expressions/list pytest tests/tck/test_tck.py -s
+```
+
+To run all passing TCK tests use:
+
+```bash
+TCK_DONE=tck_done.txt pytest tests/tck/test_tck.py -s
+```
+
+## LICENSE
+
+Licensed under the Server Side Public License v1 (SSPLv1). See [LICENSE](LICENSE).
+
+### Support our work
+
+⭐️ If you find this repository helpful, please consider giving it a star!
+
+↗️ Graph, graph database, RAG, graphrag, Retrieval-Augmented Generation,Information Retrieval, Natural Language Processing, LLM, Embeddings, Semantic Search

@@ -1,0 +1,356 @@
+from common import *
+from index_utils import *
+
+GRAPH_ID = "vecsim"
+
+class testVecsim():
+    def __init__(self):
+        self.env, self.db = Env()
+
+        # Skip on macOS with ASAN due to VectorSimilarity container-overflow bug
+        # https://github.com/RediSearch/VectorSimilarity - needs upstream fix
+        if SANITIZER and OS == "macos":
+            self.env.skip()
+
+        self.conn = self.env.getConnection()
+        self.graph = Graph(self.conn, GRAPH_ID)
+
+        self.populate()
+        self.create_indicies()
+
+    def populate(self):
+        # introduce Person nodes
+        n = 1000 # number of Person nodes
+        q = """UNWIND range(0, $n) AS i
+               CREATE (:Person {embeddings: vecf32([i,i]), embedding2: vecf32([i,sin(i + 1)])})"""
+
+        self.graph.query(q, params={'n': n})
+
+        # introduce self referencing edges
+        q = """MATCH (p:Person)
+               WITH vecf32([-ID(p), -ID(p)]) AS embeddings, p
+               CREATE (p)-[:Points {embeddings: embeddings}]->(p)"""
+        
+        self.graph.query(q)
+
+    def create_indicies(self):
+        # index nodes
+        # create vector index over Person:embeddings
+        self.graph.create_node_vector_index("Person", "embeddings", dim=2, similarity_function="euclidean")
+
+        self.graph.create_node_vector_index("Person", "embedding2", dim=2, similarity_function="cosine")
+
+        # index edges
+        # create vector index over Points::embeddings
+        self.graph.create_edge_vector_index("Points", "embeddings", dim=2, similarity_function="euclidean")
+
+        # wait for indices to be become operational
+        wait_for_indices_to_sync(self.graph)
+
+    def test01_vector_distance(self):
+        # compute euclidean distance between two vectors
+        qs = {"""RETURN vec.euclideanDistance(vecf32($a), vecf32($b)) AS dist""": 1.414,
+              """RETURN vec.cosineDistance(vecf32($a), vecf32($b)) AS dist""": 0.008}
+              
+
+        for q, d in qs.items():
+            # distance between NULL and NULL should be NULL
+            # distance between NULL and vector should be NULL
+            # distance between vector and NULL should be NULL
+            inputs = [ (None, None), (None, [1,1]), ([1,1], None) ]
+            for a, b in inputs:
+                params = {'a': a, 'b': b}
+                distance = self.graph.ro_query(q, params=params).result_set[0][0]
+                self.env.assertIsNone(distance)
+
+            # distance between same vectors should be 0
+            params = {'a': [1,1], 'b': [1,1]}
+            distance = self.graph.ro_query(q, params=params).result_set[0][0]
+            distance = round(distance, 3)
+            self.env.assertEqual(distance, 0)
+
+            # distance between [1,2] and [2,3] should be d
+            params = {'a': [1,2], 'b': [2,3]}
+            distance = self.graph.ro_query(q, params=params).result_set[0][0]
+            distance = round(distance, 3)
+            self.env.assertEqual(distance, d)
+
+            # distance between [1,1] and [2,2,3] should fail
+            # dimension mismatch
+            inputs = [([1,1], [2,2,3]), ([2,2,3], [1,1]) ]
+            for a, b in inputs:
+                try:
+                    params = {'a': [1,1], 'b': [2,2,3]}
+                    distance = self.graph.ro_query(q, params=params).result_set[0][0]
+                    self.env.assertFalse("Expected query to fail")
+                except Exception as e:
+                    self.env.assertContains("Vector dimension mismatch", str(e))
+
+            # distance between incompatible types should fail
+            inputs = [([1,1], "foo"), ("foo", [1,1]) ]
+            for a, b in inputs:
+                try:
+                    params = {'a': a, 'b': b}
+                    distance = self.graph.ro_query(q, params=params).result_set[0][0]
+                    self.env.assertFalse("Expected query to fail")
+                except Exception as e:
+                    self.env.assertContains("Type mismatch", str(e))
+
+    def test02_locate_similar_nodes(self):
+        k = 3
+        x = 50
+        y = 50
+
+        result = query_node_vector_index(self.graph, "Person", "embeddings", k,
+                                         [x,y]).result_set
+
+        self.env.assertEqual(len(result), 3)
+        for row in result:
+            embeddings = row[0].properties['embeddings']
+            self.env.assertLess(abs(embeddings[0] - x), k)
+            self.env.assertLess(abs(embeddings[1] - y), k)
+
+    def test03_locate_similar_edges(self):
+        k = 3
+        x = -50
+        y = -50
+        result = query_edge_vector_index(self.graph, "Points", "embeddings", k,
+                                         [x,y]).result_set
+
+        self.env.assertEqual(len(result), 3)
+        for row in result:
+            embeddings = row[0].properties['embeddings']
+            self.env.assertLess(abs(embeddings[0] - x), k)
+            self.env.assertLess(abs(embeddings[1] - y), k)
+
+    def test04_vecsim_result_order(self):
+        # entities returned from vecsim should be sorted by distance
+        # starting with the closest entity and increasing distance
+
+        x = 50  # query vector x
+        y = 50  # query vector y
+        k = 100 # number of results to return
+
+        q = """WITH vecf32($q) as v
+               CALL db.idx.vector.queryNodes('Person', 'embeddings', $k, v)
+               YIELD node, score
+               RETURN score, vec.euclideanDistance(node.embeddings, v) AS dist"""
+        res = self.graph.ro_query(q, params={'k':k, 'q': [x, y]}).result_set
+
+        prev_score = float('-inf')
+        for row in res:
+            score, dist = row
+            self.env.assertEqual(round(score, 3), round(dist, 3))
+            self.env.assertGreaterEqual(score, prev_score)
+            prev_score = score
+
+        q = """WITH vecf32($q) as v
+               CALL db.idx.vector.queryNodes('Person', 'embedding2', $k, v)
+               YIELD node, score
+               RETURN score, vec.cosineDistance(node.embedding2, v) AS dist"""
+        res = self.graph.ro_query(q, params={'k':k, 'q': [x, y]}).result_set
+
+        prev_score = float('-inf')
+        for row in res:
+            score, dist = row
+            self.env.assertEqual(round(score, 3), round(dist, 3))
+            self.env.assertGreaterEqual(score, prev_score)
+            prev_score = score
+
+    def test05_not_enough_results(self):
+        # ask for more results than exist in the index
+        # should return all results
+        x = 50
+        y = 50
+        k = 1000000
+
+        q = """WITH vecf32($q) as v
+                CALL db.idx.vector.queryNodes('Person', 'embeddings', $k, v)
+                YIELD node
+                RETURN count(node) AS cnt"""
+
+        count = self.graph.ro_query(q, params={'k':k, 'q': [x, y]}).result_set[0][0]
+        self.env.assertEqual(count, 1001)
+
+    def test06_validate_arguments(self):
+        # validate arguments
+        # first arugment must be a string
+        # second argument must be a string
+        # third argument must be a positive integer > 0
+        # fourth argument must be a vector
+
+        q = "CALL db.idx.vector.queryNodes($lbl, $attr, $k, vecf32($q))"
+
+        params = [
+                    {'lbl': 2, 'attr': 'embeddings', 'k': 10, 'q': [1,1]},
+                    {'lbl': 'Person', 'attr':2, 'k': 10, 'q': [1,1]},
+                    {'lbl': 'Person', 'attr': 'embeddings', 'k': '10', 'q': [1,1]},
+                    {'lbl': 'Person', 'attr': 'embeddings', 'k': -10, 'q': [1,1]}]
+
+        for p in params:
+            try:
+                self.graph.ro_query(q, params=p)
+                self.env.assertFalse("Expected query to fail")
+            except Exception as e:
+                self.env.assertContains("Invalid arguments for procedure", str(e))
+
+        p = {'lbl': 'Person', 'attr': 'embeddings', 'k': 10, 'q': False}
+        q = "CALL db.idx.vector.queryNodes($lbl, $attr, $k, $q)"
+        try:
+            self.graph.ro_query(q, params=p)
+            self.env.assertFalse("Expected query to fail")
+        except Exception as e:
+            self.env.assertContains("Invalid arguments for procedure", str(e))
+
+    def test07_mismatch_vector_dim(self):
+        # try to query a vector index using a query vector with mismatched dimension
+
+        k = 10
+        q = [1,2,3] # query vector with dimension 3, should be 2
+
+        # query node vector index
+        try:
+            result = query_node_vector_index(self.graph, "Person", "embeddings", k, q).result_set
+            self.env.assertFalse("Expected query to fail")
+        except Exception as e:
+            self.env.assertEqual("Vector dimension mismatch, expected 2 but got 3", str(e))
+
+        # query edge vector index
+        try:
+            result = query_edge_vector_index(self.graph, "Points", "embeddings", k, q).result_set
+            self.env.assertFalse("Expected query to fail")
+        except Exception as e:
+            self.env.assertEqual("Vector dimension mismatch, expected 2 but got 3", str(e))
+
+    def test08_reindex_after_update_keeps_node(self):
+        # regression: updating a vector-indexed node must not drop it from the
+        # vector index.
+        #
+        # Every property write re-indexes the node as a RediSearch REPLACE, which
+        # allocates a new docId and appends a new vector while the previous vector
+        # must be removed from the HNSW graph. If the stale vector is not removed
+        # it lingers as an orphan (a docId that no longer resolves) and shadows
+        # the live entry, making the node unfindable at small k - e.g. k=1
+        # returns nothing after any update to the node.
+        g = Graph(self.conn, "vecsim_reindex")
+
+        v = [42.0, 42.0]
+        g.query("CREATE (:RUser {id: 1})")
+        g.create_node_vector_index("RUser", "emb", dim=2,
+                                   similarity_function="euclidean")
+        wait_for_indices_to_sync(g)
+
+        def knn_hits(q, k=1):
+            return len(query_node_vector_index(g, "RUser", "emb", k, q).result_set)
+
+        # insert the vector - baseline
+        g.query("MATCH (u:RUser) SET u.emb = vecf32($v)", params={'v': v})
+        self.env.assertEqual(knn_hits(v), 1)
+
+        # re-SET the SAME value - node must still be found at k=1
+        g.query("MATCH (u:RUser) SET u.emb = vecf32($v)", params={'v': v})
+        self.env.assertEqual(knn_hits(v), 1)
+
+        # SET an unrelated property (embedding untouched) - still found at k=1
+        g.query("MATCH (u:RUser) SET u.name = 'bob'")
+        self.env.assertEqual(knn_hits(v), 1)
+
+        # SET a different value - found at the new location at k=1
+        v2 = [7.0, 7.0]
+        g.query("MATCH (u:RUser) SET u.emb = vecf32($v2)", params={'v2': v2})
+        self.env.assertEqual(knn_hits(v2), 1)
+
+    def test09_delete_removes_vector_from_index(self):
+        # regression: deleting a vector-indexed node must remove its vector from
+        # the HNSW graph, not leave it as an orphan.
+        #
+        # The low-level delete only dropped the doc-table entry and never removed
+        # the vector from VecSim, so a deleted node's vector lingered and shadowed
+        # a new node inserted at the same coordinates - the new node was
+        # unfindable at k=1.
+        g = Graph(self.conn, "vecsim_delete")
+
+        v = [42.0, 42.0]
+        g.create_node_vector_index("DUser", "emb", dim=2,
+                                   similarity_function="euclidean")
+        wait_for_indices_to_sync(g)
+
+        def knn_tags(q, k=1):
+            res = query_node_vector_index(g, "DUser", "emb", k, q).result_set
+            return [row[0].properties['tag'] for row in res]
+
+        # node A at v
+        g.query("CREATE (:DUser {tag: 'A', emb: vecf32($v)})", params={'v': v})
+        self.env.assertEqual(knn_tags(v), ['A'])
+
+        # delete A - nothing at v anymore
+        g.query("MATCH (u:DUser {tag: 'A'}) DELETE u")
+        self.env.assertEqual(knn_tags(v), [])
+
+        # a new node B at the SAME coordinates must be found, not shadowed by
+        # A's leftover vector
+        g.query("CREATE (:DUser {tag: 'B', emb: vecf32($v)})", params={'v': v})
+        self.env.assertEqual(knn_tags(v), ['B'])
+
+
+    def test10_wrong_dimension_vector_keeps_other_indexes(self):
+        # regression: a vector whose dimension differs from the index's is not
+        # indexed, but the entity must stay in every other index on its label
+        # (RediSearch rejects the whole document if the vector is added).
+        g = Graph(self.conn, "vecsim_wrong_dim")
+
+        # pre-existing entity, indexed by background population
+        g.query("CREATE (:WUser {name: 'old', emb: vecf32([1,2,3])})")
+        create_node_range_index(g, "WUser", "name")
+        g.create_node_vector_index("WUser", "emb", dim=2,
+                                   similarity_function="euclidean")
+        wait_for_indices_to_sync(g)
+
+        # entities indexed on write: wrong dimension, then a good one
+        g.query("CREATE (:WUser {name: 'new', emb: vecf32([1,2,3])})")
+        g.query("CREATE (:WUser {name: 'good', emb: vecf32([1,2])})")
+        # updating the wrong-dimension vector re-indexes the entity
+        g.query("MATCH (u:WUser {name: 'old'}) SET u.emb = vecf32([4,5,6])")
+
+        for name in ['old', 'new', 'good']:
+            q = "MATCH (u:WUser) WHERE u.name = $name RETURN u.name"
+            self.env.assertIn("Node By Index Scan", str(g.explain(q, {'name': name})))
+            res = g.ro_query(q, {'name': name}).result_set
+            self.env.assertEqual(res, [[name]])
+
+        # only the vector of the index's dimension is in the vector index
+        res = query_node_vector_index(g, "WUser", "emb", 10, [1, 2]).result_set
+        self.env.assertEqual([row[0].properties['name'] for row in res], ['good'])
+
+    def test11_vector_index_without_dimension_keeps_other_indexes(self):
+        # regression: a vector field created without a dimension has no vector
+        # params in RediSearch; adding a vector to it must not drop the entity
+        # from the label's other indexes.
+        g = Graph(self.conn, "vecsim_no_dim")
+
+        g.query("CREATE (:NUser {name: 'old', emb: vecf32([1,2,3])})")
+        create_node_range_index(g, "NUser", "name")
+        try:
+            # may be refused (no dimension); what matters is the range index
+            g.query("CREATE VECTOR INDEX FOR (n:NUser) ON (n.emb)")
+        except ResponseError:
+            pass
+        wait_for_indices_to_sync(g)
+
+        g.query("CREATE (:NUser {name: 'new', emb: vecf32([1,2,3])})")
+
+        for name in ['old', 'new']:
+            q = "MATCH (u:NUser) WHERE u.name = $name RETURN u.name"
+            self.env.assertIn("Node By Index Scan", str(g.explain(q, {'name': name})))
+            res = g.ro_query(q, {'name': name}).result_set
+            self.env.assertEqual(res, [[name]])
+
+    def test12_huge_k_is_clamped(self):
+        # regression: k far larger than the index used to size an allocation by
+        # k (crashing the server) or make the KNN query return nothing.
+        for k in [1000000000000000, 9223372036854775807]:
+            res = query_node_vector_index(self.graph, "Person", "embeddings", k, [50, 50])
+            self.env.assertEqual(len(res.result_set), 1001)
+            res = query_edge_vector_index(self.graph, "Points", "embeddings", k, [50, 50])
+            self.env.assertGreater(len(res.result_set), 0)
+        self.env.assertTrue(self.conn.ping())

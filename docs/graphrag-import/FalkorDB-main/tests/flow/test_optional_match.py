@@ -1,0 +1,425 @@
+from common import *
+from index_utils import create_node_range_index
+import re
+
+nodes = {}
+GRAPH_ID = "optional_match"
+
+
+class testOptionalFlow(FlowTestsBase):
+    def __init__(self):
+        self.env, self.db = Env()
+        self.graph = self.db.select_graph(GRAPH_ID)
+        self.populate_graph()
+
+    def populate_graph(self):
+        global nodes
+        # Construct a graph with the form:
+        # (v1)-[:E1]->(v2)-[:E2]->(v3), (v4)
+        node_props = ['v1', 'v2', 'v3', 'v4']
+
+        for idx, v in enumerate(node_props):
+            node = Node(alias=f"n_{idx}", labels="L", properties={"v": v})
+            nodes[v] = node
+
+        e0 = Edge(nodes['v1'], "E1", nodes['v2'])
+        e1 = Edge(nodes['v2'], "E2", nodes['v3'])
+
+        nodes_str = [str(node) for node in nodes.values()]
+        self.graph.query(f"CREATE {', '.join(nodes_str)}, {e0}, {e1}")
+
+    # Optional MATCH clause that does not interact with the mandatory MATCH.
+    def test01_disjoint_optional(self):
+        query = """MATCH (a {v: 'v1'}) OPTIONAL MATCH (b) RETURN a.v, b.v ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v1'],
+                           ['v1', 'v2'],
+                           ['v1', 'v3'],
+                           ['v1', 'v4']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Optional MATCH clause that extends the mandatory MATCH pattern and has matches for all results.
+    def test02_optional_traverse(self):
+        query = """MATCH (a) WHERE a.v IN ['v1', 'v2'] OPTIONAL MATCH (a)-[]->(b) RETURN a.v, b.v ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2'],
+                           ['v2', 'v3']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Optional MATCH clause that extends the mandatory MATCH pattern and has null results.
+    def test03_optional_traverse_with_nulls(self):
+        query = """MATCH (a) OPTIONAL MATCH (a)-[]->(b) RETURN a.v, b.v ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        # (v3) and (v4) have no outgoing edges.
+        expected_result = [['v1', 'v2'],
+                           ['v2', 'v3'],
+                           ['v3', None],
+                           ['v4', None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Optional MATCH clause that extends the mandatory MATCH pattern and has a WHERE clause.
+    def test04_optional_traverse_with_predicate(self):
+        query = """MATCH (a) OPTIONAL MATCH (a)-[]->(b) WHERE b.v = 'v2' RETURN a.v, b.v ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        # only (v1) has an outgoing edge to (v2).
+        expected_result = [['v1', 'v2'],
+                           ['v2', None],
+                           ['v3', None],
+                           ['v4', None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Optional MATCH clause with endpoints resolved by the mandatory MATCH pattern.
+    def test05_optional_expand_into(self):
+        query = """MATCH (a)-[]->(b) OPTIONAL MATCH (a)-[e]->(b) RETURN a.v, b.v, TYPE(e) ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2', 'E1'],
+                           ['v2', 'v3', 'E2']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+        # The OPTIONAL MATCH exactly repeats the MATCH, producing identical results.
+        query_without_optional = """MATCH (a)-[e]->(b) RETURN a.v, b.v, TYPE(e) ORDER BY a.v, b.v"""
+        result_without_optional = self.graph.query(query_without_optional)
+        self.env.assertEqual(actual_result.result_set, result_without_optional.result_set)
+
+    # Optional MATCH clause with endpoints resolved by the mandatory MATCH pattern and new filters introduced.
+    def test06_optional_expand_into_with_reltype(self):
+        query = """MATCH (a)-[]->(b) OPTIONAL MATCH (a)-[e:E2]->(b) RETURN a.v, b.v, TYPE(e) ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        # Only (v2)-[E2]->(v3) fulfills the constraint of the OPTIONAL MATCH clause.
+        expected_result = [['v1', 'v2', None],
+                           ['v2', 'v3', 'E2']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Optional MATCH clause with endpoints resolved by the mandatory MATCH pattern, but no mandatory traversal.
+    def test07_optional_expand_into_cartesian_product(self):
+        query = """MATCH (a {v: 'v1'}), (b) OPTIONAL MATCH (a)-[e]->(b) RETURN a.v, b.v, TYPE(e) ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        # All nodes are represented, but (v1)-[E1]->(v2) is the only matching connection.
+        expected_result = [['v1', 'v1', None],
+                           ['v1', 'v2', 'E1'],
+                           ['v1', 'v3', None],
+                           ['v1', 'v4', None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # TODO ExpandInto doesn't evaluate bidirectionally properly
+    # Optional MATCH clause with endpoints resolved by the mandatory MATCH pattern and a bidirectional optional pattern.
+    #  def test08_optional_expand_into_bidirectional(self):
+        #  query = """MATCH (a), (b {v: 'v2'}) OPTIONAL MATCH (a)-[e]-(b) RETURN a.v, b.v, TYPE(e) ORDER BY a.v, b.v"""
+        #  actual_result = self.graph.query(query)
+        #  # All nodes are represented, but only edges with (v2) as an endpoint match.
+        #  expected_result = [['v1', 'v2', 'E1'],
+                           #  ['v2', 'v2', None],
+                           #  ['v3', 'v2', 'E2'],
+                           #  ['v3', 'v2', None]]
+        #  self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Optional MATCH clause with variable-length traversal and some results match.
+    def test09_optional_variable_length(self):
+        query = """MATCH (a) OPTIONAL MATCH (a)-[*]->(b) RETURN a.v, b.v ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2'],
+                           ['v1', 'v3'],
+                           ['v2', 'v3'],
+                           ['v3', None],
+                           ['v4', None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Optional MATCH clause with variable-length traversal and all results match.
+    def test10_optional_variable_length_all_matches(self):
+        query = """MATCH (a {v: 'v1'}) OPTIONAL MATCH (a)-[*]->(b) RETURN a.v, b.v ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2'],
+                           ['v1', 'v3']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Optional MATCH clause with a variable-length traversal that has no matches.
+    def test11_optional_variable_length_no_matches(self):
+        query = """MATCH (a {v: 'v3'}) OPTIONAL MATCH (a)-[*]->(b) RETURN a.v, b.v ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v3', None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Multiple interdependent optional MATCH clauses.
+    def test12_multiple_optional_traversals(self):
+        query = """MATCH (a)
+                   OPTIONAL MATCH (a)-[]->(b)
+                   OPTIONAL MATCH (b)-[]->(c)
+                   RETURN a.v, b.v, c.v
+                   ORDER BY a.v, b.v, c.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2', 'v3'],
+                           ['v2', 'v3', None],
+                           ['v3', None, None],
+                           ['v4', None, None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Multiple interdependent optional MATCH clauses with both directed and bidirectional traversals.
+    def test13_multiple_optional_multi_directional_traversals(self):
+        query = """MATCH (a) OPTIONAL MATCH (a)-[]-(b) OPTIONAL MATCH (b)-[]->(c) RETURN a.v, b.v, c.v ORDER BY a.v, b.v, c.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2', 'v3'],
+                           ['v2', 'v1', 'v2'],
+                           ['v2', 'v3', None],
+                           ['v3', 'v2', 'v3'],
+                           ['v4', None, None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Multiple interdependent optional MATCH clauses with exclusively bidirectional traversals.
+    def test14_multiple_optional_bidirectional_traversals(self):
+        query = """MATCH (a) OPTIONAL MATCH (a)-[]-(b) OPTIONAL MATCH (b)-[]-(c) RETURN a.v, b.v, c.v ORDER BY a.v, b.v, c.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2', 'v1'],
+                           ['v1', 'v2', 'v3'],
+                           ['v2', 'v1', 'v2'],
+                           ['v2', 'v3', 'v2'],
+                           ['v3', 'v2', 'v1'],
+                           ['v3', 'v2', 'v3'],
+                           ['v4', None, None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Build a named path in an optional clause.
+    def test15_optional_named_path(self):
+        query = """MATCH (a)
+                   OPTIONAL MATCH p = (a)-[]->(b)
+                   RETURN length(p)
+                   ORDER BY length(p)"""
+        actual_result = self.graph.query(query)
+        # 2 nodes have outgoing edges and 2 do not, so expected 2 paths of length 1 and 2 null results.
+        expected_result = [[1],
+                           [1],
+                           [None],
+                           [None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Return a result set with null values in the first record and non-null values in subsequent records.
+    def test16_optional_null_first_result(self):
+        query = """MATCH (a) OPTIONAL MATCH (a)-[e]->(b) RETURN a, b, TYPE(e) ORDER BY EXISTS(b), a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [[nodes['v3'], None, None],
+                           [nodes['v4'], None, None],
+                           [nodes['v1'], nodes['v2'], 'E1'],
+                           [nodes['v2'], nodes['v3'], 'E2']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    def test17_optional_label_introductions(self):
+        query = """MATCH (a)
+                   OPTIONAL MATCH (a:L)-[]->(b:L)
+                   RETURN a.v, b.v
+                   ORDER BY a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2'],
+                           ['v2', 'v3'],
+                           ['v3', None],
+                           ['v4', None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Make sure highly connected nodes aren't lost
+    def test18_optional_over_intermidate(self):
+        query = """MATCH (a)-[]->(b)-[]->(c) OPTIONAL MATCH (b)-[]->(c) RETURN a"""
+        plan = str(self.graph.explain(query))
+        # Expecting to find "Expand Into" operation as both 'b' and 'c'
+        # are bounded, which means 'b' is treated as an intermidate node
+        # that needs to be tracked.
+        self.env.assertContains("Expand Into", plan)
+
+    # Validate that filters are created properly when OPTIONAL MATCH is the first clause.
+    def test19_leading_optional_match(self):
+        query = """MATCH (n) WHERE n.v = 'v1' RETURN n.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    # Validate that path filters on OPTIONAL MATCH clauses are constructed properly.
+    def test20_optional_path_filter(self):
+        query = """MATCH (n {v: 'v1'}) OPTIONAL MATCH (m:L)-[]->() WHERE (n)--() RETURN n.v, m.v ORDER BY n.v, m.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v1'],
+                           ['v1', 'v2']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+        query = """MATCH (n) OPTIONAL MATCH (m {v:'v1'})--() WHERE (n)--() RETURN n.v, m.v ORDER BY n.v, m.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v1'],
+                           ['v2', 'v1'],
+                           ['v3', 'v1'],
+                           ['v4', None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+        query = """OPTIONAL MATCH (n {v: 'v1'}) OPTIONAL MATCH (m {v: 'v2'}) WHERE (n)--(m) RETURN n.v, m.v"""
+
+    # Test placement of filters that don't rely on variable references.
+    def test21_optional_filters_without_references(self):
+        query = """OPTIONAL MATCH (a {v: 'v1'}), (b {v: 'v2'}) WHERE false RETURN a, b"""
+        actual_result = self.graph.query(query)
+        expected_result = [[None, None]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+        query = """OPTIONAL MATCH (a {v: 'v1'}), (b {v: 'v2'}) WHERE true RETURN a.v, b.v"""
+        actual_result = self.graph.query(query)
+        expected_result = [['v1', 'v2']]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+    def test22_optional_after_apply(self):
+        self.graph.delete()
+        query = """WITH [0, 0] AS n0 OPTIONAL MATCH () MERGE ()"""
+        actual_result = self.graph.query(query)
+        self.env.assertEqual(actual_result.nodes_created, 1)
+
+    def test23_optional_and_cartesian_product(self):
+        self.graph.delete()
+        self.graph.query("CREATE ()-[:A]->()")
+        query = """OPTIONAL MATCH (), ({x:0, x:1}) RETURN 0"""
+        actual_result = self.graph.query(query)
+        expected_result = [[0]]
+        self.env.assertEqual(actual_result.result_set, expected_result)
+
+        # a cartesian product within an OPTIONAL MATCH must yield the full
+        # product of its patterns, once per incoming record
+        self.graph.delete()
+        self.graph.query("UNWIND range(0, 4) AS x CREATE ()")
+
+        # bound variable re-used inside the cartesian pattern
+        # 5 records enter the OPTIONAL MATCH, each binds x0 and scans all
+        # 5 nodes for x1, for a total of 5 * 5 rows
+        query = """MATCH (x0)
+                   WITH x0
+                   OPTIONAL MATCH (x0), (x1)
+                   RETURN count(*)"""
+        actual_result = self.graph.query(query)
+        self.env.assertEqual(actual_result.result_set, [[25]])
+
+        # every returned row must carry a non-NULL binding, the patterns
+        # are all satisfiable
+        query = """MATCH (x0)
+                   WITH x0
+                   OPTIONAL MATCH (x0), (x1)
+                   RETURN count(x0), count(x1)"""
+        actual_result = self.graph.query(query)
+        self.env.assertEqual(actual_result.result_set, [[25, 25]])
+
+        # two fresh variables in the optional cartesian pattern,
+        # 5 records each producing 5 * 5 rows
+        query = """MATCH (n)
+                   OPTIONAL MATCH (a), (b)
+                   RETURN count(*)"""
+        actual_result = self.graph.query(query)
+        self.env.assertEqual(actual_result.result_set, [[125]])
+
+    def test24_optional_no_matchings(self):
+        # due to delayed init within the Apply op this used to crash the server
+        # discovered by Celine Wuest
+
+        # run on an empty graph
+        self.graph.delete()
+
+        q = """WITH 0 AS n0
+               OPTIONAL MATCH ()
+               WITH 0 AS n1
+               LIMIT 0
+               CREATE ()"""
+
+        self.graph.query(q)
+
+    # validate Optional Conditional Traverse operation is used
+    def test25_optional_batch_traversal(self):
+        query = """MATCH (a)
+                   OPTIONAL MATCH (a)-[]->(b)
+                   OPTIONAL MATCH (b)-[]->(c)
+                   RETURN a, b, c"""
+
+        # Expecting to find "Optional Conditional Traverse" operations
+        plan = str(self.graph.explain(query))
+        self.env.assertContains("Optional Conditional Traverse | (a)->(b)", plan)
+        self.env.assertContains("Optional Conditional Traverse | (b)->(c)", plan)
+
+    # OPTIONAL MATCH on the same alias with a different (indexed) label
+    def test26_optional_match_indexed_label_on_same_alias(self):
+        # use a fresh graph
+        graph_id = "optional_match_indexed_label"
+        g = self.db.select_graph(graph_id)
+
+        # create an index on the label that only appears in the OPTIONAL MATCH
+        create_node_range_index(g, 'N', 'v', sync=True)
+
+        q = """MATCH (n :M {v:-2})-[r1]->(m)
+               OPTIONAL MATCH (n :N)-[r2]->(m)
+               RETURN DISTINCT n, r1, r2, m"""
+
+        result = g.query(q)
+        self.env.assertEqual(result.result_set, [])
+
+        # populate with data and run again
+        g.query(
+            """CREATE (n:M {v:-2})-[:R1]->(m),
+                      (n)-[:R2]->(m),
+                      (x:N {v:6})""")
+
+        result = g.query(q)
+        # n (M) is connected to m via two edges (R1, R2);
+        # n has no N label so OPTIONAL MATCH yields NULL r2 in both rows
+        self.env.assertEqual(len(result.result_set), 2)
+        for row in result.result_set:
+            self.env.assertIsNone(row[2])  # r2 must be null
+
+        g.delete()
+
+    def test27_limited_optional_match(self):
+        """
+        make sure limit is handled and enforced by the
+        optional conditional traverse operation
+        """
+
+        # start fresh
+        self.graph.delete()
+
+        # create the graph
+        q = "UNWIND range(0, 2) AS x CREATE (:Label)-[:REL]->()"
+        self.graph.query(q)
+
+        q = "CREATE (:Label)"
+        self.graph.query(q)
+
+        q = "MATCH (a:Label) OPTIONAL MATCH (a)-[:REL]->(b) RETURN a, b LIMIT 10"
+        res = self.graph.query(q).result_set
+
+        self.env.assertEqual(len(res), 4)
+
+        # enlarge the graph
+        q = "UNWIND range(0, 9) AS x CREATE (:Label)-[:REL]->()"
+        self.graph.query(q)
+
+        q = "MATCH (a:Label) OPTIONAL MATCH (a)-[:REL]->(b) RETURN a, b LIMIT 10"
+        res = self.graph.query(q).result_set
+
+        self.env.assertEqual(len(res), 10)
+
+    # cardinality of multi-pattern OPTIONAL MATCH over relationships
+    def test28_optional_multi_pattern_traversals(self):
+        self.graph.delete()
+
+        # (a:L2)-[:T5]->(:L5) appears twice, and a single (:L4)-[:T6]->()
+        self.graph.query("""CREATE (:L2)<-[:T2]-(:L2)-[:T5]->(:L5),
+                                   (:L2)<-[:T2]-(:L2)-[:T5]->(:L5),
+                                   ()<-[:T6]-(:L4)""")
+
+        # 4 (:L2) nodes drive the OPTIONAL MATCH, whose cartesian product
+        # holds 2 matches for the :T5 pattern and 1 for the :T6 pattern,
+        # for a total of 4 * 2 * 1 rows
+        query = """MATCH (n0:L2)
+                   OPTIONAL MATCH (n9:L2)-[r6:T5]->(n8), (n11)<-[r8:T6]-(n12)
+                   RETURN count(*)"""
+        actual_result = self.graph.query(query)
+        self.env.assertEqual(actual_result.result_set, [[8]])
+
+        # consecutive OPTIONAL MATCH clauses re-binding already bound
+        # variables must not multiply the cardinality
+        self.graph.delete()
+        self.graph.query("CREATE (:L1)<-[:T1]-(:L2)-[:T1]->(:L1)")
+
+        query = """MATCH (n0)<-[m0]-(n1)-[m1]->(n2)
+                   WITH n0
+                   OPTIONAL MATCH (n0)<-[m2]-(n1)-[m3]->(n2)
+                   OPTIONAL MATCH (n0)<-[]-(n1)-[]->(n2)
+                   RETURN count(1)"""
+        actual_result = self.graph.query(query)
+        self.env.assertEqual(actual_result.result_set, [[2]])
