@@ -1,0 +1,67 @@
+package com.moyz.adi.common.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.moyz.adi.common.enums.SegmentModeEnum;
+import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.format.FormatterRegistry;
+import org.springframework.http.converter.ByteArrayHttpMessageConverter;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.StringHttpMessageConverter;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+import java.util.List;
+
+@Slf4j
+@Configuration
+public class WebMvcConfig implements WebMvcConfigurer {
+
+    @Resource
+    private ObjectMapper objectMapper;
+
+    @Override
+    public void configureMessageConverters(List<HttpMessageConverter<?>> converters) {
+        log.info("WebMvcConfig==configureMessageConverters");
+        WebMvcConfigurer.super.configureMessageConverters(converters);
+        converters.add(new StringHttpMessageConverter());
+        converters.add(new MappingJackson2HttpMessageConverter(objectMapper));
+        converters.add(new ByteArrayHttpMessageConverter());
+    }
+
+    /**
+     * Binds segmentMode query params / form fields by enum value, case-insensitively
+     * (qa/text/parent_child)
+     */
+    @Override
+    public void addFormatters(FormatterRegistry registry) {
+        registry.addConverter(String.class, SegmentModeEnum.class, source -> {
+            SegmentModeEnum mode = SegmentModeEnum.fromValue(source);
+            if (mode == null) {
+                throw new IllegalArgumentException("Invalid segmentMode: " + source);
+            }
+            return mode;
+        });
+    }
+
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/**")
+                .allowedMethods("GET", "POST", "PUT", "DELETE")
+                .allowedHeaders("*"); // 允许的请求头
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+//Replaced by ParamsLogAspect
+        //使用ParamsLogAspect代替
+//        log.info("WebMvcConfig==addInterceptors");
+//        registry.addInterceptor(logInterceptor)
+//                .addPathPatterns("/**")
+//                .excludePathPatterns("/swagger-resources/**", "/webjars/**", "/v3/**", "/swagger-ui.html");
+    }
+
+}

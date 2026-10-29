@@ -1,0 +1,529 @@
+from common import *
+import math
+from math import floor, ceil, sqrt
+
+GRAPH_ID = "aggregations"
+
+class testAggregations():
+    def __init__(self):
+        self.env, self.db = Env()
+        self.graph = self.db.select_graph(GRAPH_ID)
+
+    def get_res_and_assertEquals(self, query, expected_result):
+        actual_result = self.graph.query(query)
+        self.env.assertEqual(actual_result.result_set, expected_result)
+    
+    def get_res_and_assertAlmostEquals(self, query, expected_result):
+        actual_result = self.graph.query(query)
+        self.env.assertAlmostEqual(actual_result.result_set[0][0], expected_result[0][0], 0.0001)
+
+    # test aggregation default values
+    # default values should be returned when the aggregation operation
+    # was not given any data to process
+    # and the aggregation doesn't specify any keys
+    def test01_empty_aggregation(self):
+        # default aggregation values
+        expected_result = [0,    # count
+                           None, # min
+                           None, # max
+                           0,    # sum
+                           None, # avg
+                           0,    # stDev
+                           0,    # stDevP
+                           [],   # collect,
+                           None, # percentileDisc
+                           None  # percentileCont
+                           ]
+
+        query = """MATCH (n) WHERE n.v = 'noneExisting'
+                   RETURN count(n), min(n.v), max(n.v), sum(n.v), avg(n.v),
+                   stDev(n.v), stDevP(n.v), collect(n),
+                   percentileDisc(n.v, 0.5), percentileCont(n.v, 0.5)"""
+        result = self.graph.query(query)
+        self.env.assertEqual(result.result_set[0], expected_result)
+
+        # issue a similar query only perform aggregations within a WITH clause
+        query = """MATCH (n) WHERE n.v = 'noneExisting'
+                   WITH count(n) as A, min(n.v) as B, max(n.v) as C, sum(n.v) as D,
+                   avg(n.v) as E, stDev(n.v) as F,  stDevP(n.v) as G,
+                   collect(n) as H, percentileDisc(n.v, 0.5) as I,
+                   percentileCont(n.v, 0.5) as J
+                   RETURN *"""
+
+        result = self.graph.query(query)
+        self.env.assertEqual(result.result_set[0], expected_result)
+    
+    def test02_countTest(self):
+        query = "UNWIND [NULL, NULL, NULL, NULL, NULL] AS x RETURN count(1)"
+        expected = 5
+        actual_result = self.graph.query(query).result_set[0][0]
+        self.env.assertEqual(actual_result, expected)
+    
+    def test03_partialCountTest(self):
+        query = "UNWIND [NULL, 1, NULL, 1, NULL, 1, NULL, 1, NULL, 1] AS x RETURN count(x)"
+        expected = 5
+        actual_result = self.graph.query(query).result_set[0][0]
+        self.env.assertEqual(actual_result, expected)
+    
+    def test04_percentileCont(self):
+        expected_values = []
+        percentile_doubles = [0, 0.1, 0.33, 0.5, 1]
+        arr = [2, 4, 6, 8, 10]
+        count = 5
+        for i in range(5):
+            x = percentile_doubles[i] * (count - 1)
+            lower_idx = floor(x)
+            upper_idx = ceil(x)
+            if lower_idx == upper_idx or lower_idx == (count - 1):
+                expected_values.append([[arr[lower_idx]]])
+                continue
+            lower = arr[lower_idx]
+            upper = arr[upper_idx]
+
+            expected_values.append([[lower * (upper_idx - x) + (upper * (x - lower_idx))]])
+
+        for i in range(5):
+            query = f'UNWIND [2, 4, 6, 8, 10] AS x RETURN percentileCont(x, {percentile_doubles[i]})'
+            self.get_res_and_assertAlmostEquals(query, expected_values[i])
+    
+    def test05_percentileDisc(self):
+        percentile_doubles = [0, 0.1, 0.33, 0.5, 1]
+        expected = [0, 0, 1, 2, 4]
+        expectedResults = [0] * 5
+        for i in range(1, 6):
+            expectedResults[i-1] = i * 2
+        for i in range(5):
+            query = f'UNWIND [2, 4, 6, 8, 10] AS x RETURN percentileDisc(x, {percentile_doubles[i]})'
+            self.get_res_and_assertAlmostEquals(query, [[expectedResults[expected[i]]]])
+        
+        query = f'UNWIND [0.5, 0, 1] AS x RETURN percentileDisc(x, 0)'
+        self.get_res_and_assertAlmostEquals(query, [[0]])
+    
+    def test06_StDev(self):
+        # Edge case - less than 2 arguments.
+        self.get_res_and_assertEquals("RETURN stDev(5.1)", [[0]])
+        # 10 first integers.
+        query = f'UNWIND [1, 2, 3, 4, 5, 6 , 7, 8, 9, 10] AS x RETURN stDev(x)'
+        sum = 0
+        for i in range(1, 11):
+            sum += i
+        mean = sum / 10
+        tmp_var = 0
+        for i in range(1, 11):
+            tmp_var += pow(i-mean, 2)
+        sample_var = tmp_var / 9
+        sample_res = sqrt(sample_var)
+        self.get_res_and_assertAlmostEquals(query, [[sample_res]])
+
+    def test07_AverageDoubleOverflow(self):
+        double_max = '1.7976931348623157e+308'
+        query = f'UNWIND [{double_max}, {double_max} / 2] AS x RETURN avg(x)'
+        query2 = f'RETURN ({double_max} / 2 + {double_max} / 4)'
+        res1 = self.graph.query(query).result_set[0][0]
+        res2 = self.graph.query(query2).result_set[0][0]
+        self.env.assertEqual(res1, res2)
+    
+    def test08_AggregateLongOverflow(self):
+        long_max = 2147483647
+        query = f'UNWIND [{long_max}, {long_max / 2}] AS x RETURN avg(x)'
+        expected = [[long_max / 2 + long_max / 4]]
+        self.get_res_and_assertAlmostEquals(query, expected)
+    
+    def test09_AggregateWithNullFilter(self):
+        query = 'CREATE (:L {p:0.0/0.0})'
+        self.graph.query(query)
+
+        query = 'MATCH (n:L) WHERE (null <> false) XOR true RETURN COUNT(n)'
+        expected = [[0]]
+        self.get_res_and_assertAlmostEquals(query, expected)
+
+    def test10_AggregateCollection(self):
+        """
+            Collect a bunch of different items
+        """
+
+        # Collecting null values
+        q = "RETURN collect(NULL) AS collection"
+        expected = [[[]]]  # Empty collection
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting integers
+        q = "RETURN collect(1) AS collection"
+        expected = [[[1]]]
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting multiple integers
+        q = "UNWIND [1, 2, 3] AS x RETURN collect(x)"
+        expected = [[[1, 2, 3]]]
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting floating point numbers
+        q = "UNWIND [1.1, 2.2, 3.3] AS x RETURN collect(x)"
+        expected = [[[1.1, 2.2, 3.3]]]
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting strings
+        q = "UNWIND ['a', 'b', 'c'] AS x RETURN collect(x)"
+        expected = [[['a', 'b', 'c']]]
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting booleans
+        q = "UNWIND [true, false] AS x RETURN collect(x)"
+        expected = [[[True, False]]]
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting mixed data types
+        q = "UNWIND [1, 'a', 3.14, true, NULL] AS x RETURN collect(x)"
+        expected = [[[1, 'a', 3.14, True]]]  # Null collection should be empty
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting an empty set
+        q = "MATCH (n:NoneExisting) WHERE false RETURN collect(n)"
+        expected = [[[]]]
+        self.get_res_and_assertEquals(q, expected)
+
+        # Create a few nodes
+        res = self.graph.query("""CREATE (a:Person {name: 'Alice'}),
+                                         (b:Person {name: 'Bob'})
+                                  RETURN a, b""")
+        nodes = [res.result_set[0][0], res.result_set[0][1]]
+
+        # Collecting nodes properties
+        q = """MATCH (p:Person)
+               WITH p
+               ORDER BY p.name
+               RETURN collect(p.name) AS names"""
+
+        expected = ['Alice', 'Bob']
+        res = self.graph.query(q).result_set
+        self.env.assertEqual(res[0][0], expected)
+
+        # Collecting nodes
+        q = """MATCH (p:Person)
+               WITH p
+               ORDER BY p.name
+               RETURN collect(p) AS nodes"""
+        expected = nodes
+        res = self.graph.query(q).result_set
+        self.env.assertEqual(res[0][0], expected)
+
+        # Collecting relationships
+        res = self.graph.query("""UNWIND range(0,1) AS x
+                                  CREATE (:A)-[r:RELATES_TO]->(:B)
+                                  RETURN r
+                                  ORDER BY ID(r)""")
+        edges = [row[0] for row in res.result_set]
+
+        q = """MATCH (:A)-[r:RELATES_TO]->(:B)
+               WITH r
+               ORDER BY ID(r)
+               RETURN collect(r) AS edges"""
+
+        expected = edges
+        res = self.graph.query(q).result_set[0][0]
+        self.env.assertEqual(res, expected)
+
+        # Collecting maps (dictionaries)
+        q = "RETURN collect({key:'value', num:42}) AS collection"
+        expected = [[[{'key': 'value', 'num': 42}]]]
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting lists
+        q = "RETURN collect([1, 2, 3]) AS collection"
+        expected = [[[ [1, 2, 3] ]]]
+        self.get_res_and_assertEquals(q, expected)
+
+        # Collecting large dataset
+        q = """UNWIND range(1, 10000) AS x
+               RETURN collect({x:x, str: toString(x)}), collect([x, -x])"""
+        expected = [
+                [ {'x':x, 'str': str(x)} for x in range(1, 10001) ],
+                [ [x, -x]                for x in range(1, 10001) ]
+        ]
+        res = self.graph.query(q).result_set[0]
+        self.env.assertEqual(res, expected)
+
+        # Collecting passed values
+        q = """
+        WITH [{a: 'Hello', b: [1, {x: 'y'}, 'GoodBye!']}, 4] AS collection
+        MATCH (p:Person)
+        WITH p, collection[ID(p) % 2] AS elem0, collect(collection[0]) AS collection
+        ORDER BY ID(p) ASC
+        WITH elem0, collection[0] AS collection
+        RETURN elem0, collection
+        """
+
+        res = self.graph.query(q).result_set
+        expected = [
+            [4, {'a': 'Hello', 'b': [1, {'x': 'y'}, 'GoodBye!']}],
+            [{'a': 'Hello', 'b': [1, {'x': 'y'}, 'GoodBye!']},
+             {'a': 'Hello', 'b': [1, {'x': 'y'}, 'GoodBye!']}]
+        ]
+
+        self.env.assertEqual(res, expected)
+
+    def test_aggregate_over_map_property(self):
+        # Issue #2555: an aggregation whose only argument is a bare one-level
+        # dot access on a *map* aggregated nothing at all — `collect()` gave
+        # `[]`, `count()` gave 0, `sum()` gave 0 — with no error. The bulk
+        # aggregate-input path read the column through its own node/edge
+        # lookup, which answered null for a map; every shape that missed that
+        # path (bracket index, a wrapping function, a grouping key) was fine,
+        # which is what made it so easy to miss.
+        rows = "UNWIND [{t:'a', n:1}, {t:'b', n:2}] AS row"
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN collect(row.t)").result_set, [[['a', 'b']]])
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN count(row.t)").result_set, [[2]])
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN max(row.t)").result_set, [['b']])
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN sum(row.n)").result_set, [[3]])
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN collect(row.t), count(*)").result_set,
+            [[['a', 'b'], 2]])
+        self.env.assertEqual(
+            self.graph.query("WITH {t:'a'} AS row RETURN collect(row.t)").result_set,
+            [[['a']]])
+
+        # The shapes that always worked must keep working: whichever path an
+        # aggregation input takes, it has to agree with the others.
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN collect(row['t'])").result_set, [[['a', 'b']]])
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN collect(toUpper(row.t))").result_set,
+            [[['A', 'B']]])
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN 1 AS k, collect(row.t)").result_set,
+            [[1, ['a', 'b']]])
+        self.env.assertEqual(
+            self.graph.query("UNWIND [{m:{k:'a'}},{m:{k:'b'}}] AS row RETURN collect(row.m.k)").result_set,
+            [[['a', 'b']]])
+        # DISTINCT takes its own analysis branch.
+        self.env.assertEqual(
+            self.graph.query("UNWIND [{t:'a'},{t:'a'},{t:'b'}] AS row RETURN count(DISTINCT row.t)").result_set,
+            [[2]])
+
+        # A missing map key is null, and null does not accumulate.
+        self.env.assertEqual(
+            self.graph.query(f"{rows} RETURN count(row.missing), collect(row.missing)").result_set,
+            [[0, []]])
+
+        # Node and relationship properties still take the bulk path.
+        self.graph.query("CREATE (:M {v: 1})-[:R {w: 2}]->(:M {v: 3})")
+        self.env.assertEqual(
+            self.graph.query("MATCH (n:M) RETURN sum(n.v)").result_set, [[4]])
+        self.env.assertEqual(
+            self.graph.query("MATCH ()-[r:R]->() RETURN sum(r.w)").result_set, [[2]])
+
+    def test_computed_group_key_matches_a_precomputed_one(self):
+        # A grouping key that is not a bare variable or property used to send
+        # the *whole* aggregate operator down the per-row path — aggregate
+        # inputs losing their bulk extraction along with it. The oracle for the
+        # columnar key is the same key computed in a `WITH`, which reaches the
+        # aggregate as a plain variable and so takes the path that always
+        # existed. The two must agree on values, on grouping, and on order.
+        self.graph.delete()
+        self.graph.query(
+            "UNWIND range(0, 99) AS i CREATE (:K {i: i, s: toString(i % 7)})")
+
+        for key in ["k.i % 5", "k.i / 10", "k.s + '!'", "toUpper(k.s)",
+                    "k.i % 5 + k.i % 3", "abs(k.i - 50)", "[k.i % 4]",
+                    "k.missing", "k.i % 2 = 0"]:
+            direct = self.graph.query(
+                f"MATCH (k:K) RETURN {key} AS g, count(*) AS c ORDER BY c, g").result_set
+            oracle = self.graph.query(
+                f"MATCH (k:K) WITH {key} AS g RETURN g, count(*) AS c ORDER BY c, g").result_set
+            self.env.assertEqual(direct, oracle)
+
+        # Two keys, one of each kind, and an aggregate input that is itself a
+        # computed column: the paths compose or they do not.
+        direct = self.graph.query(
+            "MATCH (k:K) RETURN k.i % 3 AS a, k.s AS b, sum(k.i * 2) AS t ORDER BY a, b").result_set
+        oracle = self.graph.query(
+            "MATCH (k:K) WITH k, k.i % 3 AS a RETURN a, k.s AS b, sum(k.i * 2) AS t ORDER BY a, b").result_set
+        self.env.assertEqual(direct, oracle)
+
+    def test_computed_group_key_keeps_integers_exact(self):
+        # The bulk key extractor deliberately avoids the column classifier's
+        # float lane, because promoting a mixed int/float column would round
+        # 9007199254740993 to 9007199254740992 and merge two distinct groups
+        # into one. The computed-key path has to hold that line too: the float
+        # in this graph is what makes the column mixed.
+        self.graph.delete()
+        self.graph.query(
+            "CREATE (:P {v: 9007199254740993}), (:P {v: 9007199254740992}), (:P {v: 1.5})")
+
+        expected = [[1.5, 1], [9007199254740992, 1], [9007199254740993, 1]]
+        self.env.assertEqual(
+            self.graph.query(
+                "MATCH (p:P) RETURN p.v + 0 AS k, count(*) ORDER BY k").result_set,
+            expected)
+        # And the two big keys are still integers, not floats that happen to
+        # print without a fraction.
+        types = self.graph.query(
+            "MATCH (p:P) RETURN p.v + 0 AS k, count(*) ORDER BY k").result_set
+        self.env.assertEqual([type(r[0]) for r in types], [float, int, int])
+
+    def test_distinct_over_a_computed_argument(self):
+        # `DISTINCT <expr>` used to be restricted to a bare variable or
+        # property; anything else fell back. Deduplication happens per value
+        # after the column is built, so the shape of the expression that built
+        # it cannot matter — these check that it does not.
+        self.graph.delete()
+        self.graph.query("UNWIND range(0, 99) AS i CREATE (:D {i: i})")
+
+        self.env.assertEqual(
+            self.graph.query("MATCH (d:D) RETURN count(DISTINCT d.i % 10)").result_set,
+            [[10]])
+        self.env.assertEqual(
+            self.graph.query("MATCH (d:D) RETURN size(collect(DISTINCT d.i % 4))").result_set,
+            [[4]])
+        self.env.assertEqual(
+            self.graph.query("MATCH (d:D) RETURN sum(DISTINCT d.i % 3)").result_set,
+            [[3]])
+        # Grouped, so the dedup state is per group and not shared across them.
+        direct = self.graph.query(
+            "MATCH (d:D) RETURN d.i % 2 AS g, count(DISTINCT d.i % 10) AS c ORDER BY g").result_set
+        self.env.assertEqual(direct, [[0, 5], [1, 5]])
+        # Null never accumulates, distinct or not.
+        self.env.assertEqual(
+            self.graph.query("MATCH (d:D) RETURN count(DISTINCT d.missing)").result_set,
+            [[0]])
+
+    def test_multi_argument_aggregation_validates_its_constant(self):
+        # `percentileDisc(x, 0.5)` is the multi-argument shape. Bringing it onto
+        # the columnar path meant carrying the trailing constant through the
+        # accumulate loop, and that loop checked argument *types* but not their
+        # *domain* — so an out-of-range percentile reached a kernel that indexes
+        # by it and crashed the server. These are the cases that crashed.
+        self.graph.delete()
+        self.graph.query("UNWIND range(1, 5) AS i CREATE (:Q {v: i})")
+
+        self.env.assertEqual(
+            self.graph.query("MATCH (q:Q) RETURN percentileDisc(q.v, 0.5)").result_set, [[3]])
+        self.env.assertEqual(
+            self.graph.query("MATCH (q:Q) RETURN percentileCont(q.v, 0.25)").result_set, [[2]])
+        # A computed first argument, and a grouped form.
+        self.env.assertEqual(
+            self.graph.query("MATCH (q:Q) RETURN percentileDisc(q.v * 2, 0.5)").result_set, [[6]])
+        direct = self.graph.query(
+            "MATCH (q:Q) RETURN q.v % 2 AS g, percentileDisc(q.v, 1.0) AS p ORDER BY g").result_set
+        self.env.assertEqual(direct, [[0, 4], [1, 5]])
+
+        for bad, msg in [("1.2", "must be a number in the range 0.0 to 1.0"),
+                         ("-0.5", "must be a number in the range 0.0 to 1.0"),
+                         ("null", "Type mismatch")]:
+            try:
+                self.graph.query(f"MATCH (q:Q) RETURN percentileDisc(q.v, {bad})")
+                self.env.assertTrue(False, depth=1)
+            except Exception as e:
+                self.env.assertContains(msg, str(e))
+        # The server is still there — the point of the domain check.
+        self.env.assertEqual(
+            self.graph.query("MATCH (q:Q) RETURN count(*)").result_set, [[5]])
+
+    def test_row_dependent_percentile_uses_first_row(self):
+        # A percentile argument that changes per row used the last row's value;
+        # C uses the first row's (#2980).
+        self.get_res_and_assertEquals(
+            "UNWIND range(1, 10) AS x RETURN percentileDisc(x, x / 10.0), percentileCont(x, 1.0 - x / 10.0)",
+            [[1, 9.1]])
+        self.get_res_and_assertEquals(
+            "UNWIND [1, 2, 3] AS x RETURN x % 2 AS k, percentileDisc(x, x / 10.0) ORDER BY k",
+            [[0, 2], [1, 1]])
+
+    def test_list_literal_of_aggregates(self):
+        # An aggregate that is an element of a list literal used to end the
+        # whole expression's evaluation, so the list collapsed to that one
+        # aggregate's value (#2945).
+        self.get_res_and_assertEquals(
+            "UNWIND [1, 2] AS x RETURN [min(x), max(x)], [count(x), 5]",
+            [[[1, 2], [2, 5]]])
+        self.get_res_and_assertEquals(
+            "UNWIND [1, 2] AS x RETURN size([count(x)])", [[1]])
+        self.get_res_and_assertEquals(
+            "UNWIND [1, 2, 3] AS x RETURN x % 2 AS k, [count(x), sum(x)] AS l ORDER BY k",
+            [[0, [1, 2]], [1, [2, 4]]])
+
+    def test_nan_grouping_and_min_max(self):
+        # Issue #2913: grouping compared keys with `=`, under which NaN is not
+        # equal to itself, so every NaN opened its own group; and min/max let
+        # a NaN displace the current best and then be displaced by the next
+        # value (`min` over [1.0, NaN, 3.0] was 3.0). C groups all NaNs
+        # together, and its min/max skip a comparison against NaN.
+        g = self.db.select_graph("agg_nan")
+
+        def kind(v):
+            if isinstance(v, float) and math.isnan(v):
+                return 'nan'
+            if isinstance(v, list):
+                return 'list'
+            if isinstance(v, dict):
+                return 'map'
+            return v
+
+        try:
+            res = g.query("""UNWIND [0.0/0.0, 1.0, 0.0/0.0, -(0.0/0.0), [0.0/0.0],
+                                     [0.0/0.0], {a: 0.0/0.0}, {a: 0.0/0.0}, 1] AS x
+                             RETURN x, count(*)""").result_set
+            self.env.assertEqual(sorted((str(kind(r[0])), r[1]) for r in res),
+                                 [('1.0', 2), ('list', 2), ('map', 2), ('nan', 3)])
+
+            g.query("UNWIND [1.0, 0.0/0.0, 3.0, 0.0/0.0] AS v CREATE (:N {v: v})")
+            # property key (bulk path) and a computed key
+            for key in ["n.v", "n.v + 0"]:
+                res = g.query(f"MATCH (n:N) RETURN {key} AS k, count(*)").result_set
+                self.env.assertEqual(sorted((str(kind(r[0])), r[1]) for r in res),
+                                     [('1.0', 1), ('3.0', 1), ('nan', 2)])
+
+            # bulk property input, computed input, and a grouped aggregation
+            for q in ["MATCH (n:N) RETURN min(n.v), max(n.v)",
+                      "MATCH (n:N) RETURN min(n.v + 0), max(n.v + 0)",
+                      "UNWIND [1.0, 0.0/0.0, 3.0] AS x RETURN min(x), max(x)",
+                      "UNWIND [1.0, 3.0, 0.0/0.0] AS x RETURN min(x), max(x)",
+                      "UNWIND [1.0, 0.0/0.0, 3.0] AS x RETURN 1 AS k, min(x), max(x)"]:
+                row = g.query(q).result_set[0]
+                self.env.assertEqual(row[-2:], [1.0, 3.0])
+
+            # Vector and point keys: C groups every NaN component together but
+            # keeps -0.0 and 0.0 apart (unlike Float keys, where they merge).
+            for q, expected in [
+                ("UNWIND [vecf32([0.0/0.0]), vecf32([-(0.0/0.0)])] AS v RETURN v, count(*)", [2]),
+                ("UNWIND [vecf32([0.0]), vecf32([-0.0])] AS v RETURN v, count(*)", [1, 1]),
+                ("UNWIND [point({latitude: 0.0, longitude: 0.0}), point({latitude: -0.0, longitude: 0.0})] AS p RETURN p, count(*)", [1, 1]),
+                ("UNWIND [0.0, -0.0] AS x RETURN x, count(*)", [2]),
+            ]:
+                res = g.query(q).result_set
+                self.env.assertEqual(sorted(r[1] for r in res), expected, message=q)
+        finally:
+            g.delete()
+
+    def test_null_key_sharing_an_accumulator_slot(self):
+        # The binder may give an aggregate's accumulator the slot id of a
+        # grouping key. Unbinding the accumulator after the key was written
+        # left the key unbound, and a null key then dropped out of the batch,
+        # so the reply hit an unwrap on None and the server exited (#3150).
+        g = self.db.select_graph("agg_null_key")
+        try:
+            g.query("""CREATE (:Invitation {id: 'inv1', email: 'm@x.org', created_at: 1}),
+                              (:K:Node {id: 'k', tier: 1})-[:P {w: 1}]->(:D:Node {id: 'd'})""")
+            for q, expected in [
+                ("RETURN null AS x, count(1) AS n", [[None, 1]]),
+                ("RETURN null AS x, collect(1) AS c", [[None, [1]]]),
+                ("MATCH (n:D) RETURN n.id AS k, n.missing AS x, count(n) AS c", [['d', None, 1]]),
+                ("MATCH (n:D) WITH n, 1 AS hops RETURN n.id AS id, min(hops), n.tier AS tier",
+                 [['d', 1, None]]),
+                ("""MATCH (inv:Invitation {id: 'inv1'})
+                    OPTIONAL MATCH (u:User) WHERE u.email = inv.email
+                    OPTIONAL MATCH (newer:Invitation)
+                        WHERE newer.email = inv.email AND newer.created_at > inv.created_at
+                    RETURN inv.id, u IS NOT NULL, u.a, u.b, collect(newer)""",
+                 [['inv1', False, None, None, []]]),
+                # keys must not be overwritten by one another either
+                ("WITH 1 AS a, 2 AS b RETURN b AS x, a AS y, count(*)", [[2, 1, 1]]),
+            ]:
+                res = g.query(q).result_set
+                self.env.assertEqual(res, expected, message=q)
+        finally:
+            g.delete()

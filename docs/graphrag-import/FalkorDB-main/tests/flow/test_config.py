@@ -1,0 +1,606 @@
+import os
+from common import *
+
+GRAPH_ID = "config"
+NUMBER_OF_CONFIGURATIONS = 24 # number of configurations available
+
+class testConfig(FlowTestsBase):
+    def __init__(self):
+        self.env, self.db = Env()
+        self.redis_con = self.env.getConnection()
+        self.graph = self.db.select_graph(GRAPH_ID)
+
+    def test01_config_get(self):
+        # Try reading 'QUERY_MEM_CAPACITY' from config
+        config_name = "QUERY_MEM_CAPACITY"
+        response = self.db.config_get(config_name)
+        expected_response = 0 # capacity=QUERY_MEM_CAPACITY_UNLIMITED
+        self.env.assertEqual(response, expected_response)
+
+        # Try reading all configurations
+        response = self.redis_con.execute_command("GRAPH.CONFIG GET *")
+
+        # 16 configurations should be reported
+        self.env.assertEqual(len(response), NUMBER_OF_CONFIGURATIONS)
+
+        # validate default configuration values
+
+        default_config = [
+                ("TIMEOUT", 0),
+                ("TIMEOUT_DEFAULT", 0),
+                ("TIMEOUT_MAX",  0),
+                ("CACHE_SIZE", 25),
+                ("ASYNC_DELETE", [0,1]), # could be either 0 or 1 depending on load time config
+                ("OMP_THREAD_COUNT", os.cpu_count()),
+                ("THREAD_COUNT", os.cpu_count()),
+                ("INDEX_WORKER_THREADS", 0),
+                ("RESULTSET_SIZE", -1),
+                ("VKEY_MAX_ENTITY_COUNT", 100000),
+                ("MAX_QUEUED_QUERIES", 10000),
+                ("QUERY_MEM_CAPACITY", 0),
+                ("DELTA_MAX_PENDING_CHANGES", 10000),
+                ("NODE_CREATION_BUFFER", 16384),
+                ("CMD_INFO", 1),
+                ("MAX_INFO_QUERIES", 1000),
+                ("EFFECTS_COMPRESSION", 0),
+                # Deprecated and read by nothing, kept settable at its original
+                # default so a config file or client that names it does not
+                # fail. See src/config.rs.
+                ("EFFECTS_THRESHOLD", 300),
+                ("BOLT_PORT", 65535),
+                ("DELAY_INDEXING", 0),
+                ("IMPORT_FOLDER", "/var/lib/FalkorDB/import/"),
+                ("TEMP_FOLDER", "/tmp"),
+                ("JS_HEAP_SIZE", 256 * 1024 * 1024),
+                ("JS_STACK_SIZE", 1024 * 1024)
+        ]
+
+        for i, config in enumerate(response):
+            name  = config[0]
+            value = config[1]
+
+            # validate config name
+            self.env.assertEqual(name, default_config[i][0])
+
+            # validate config value
+            if type(default_config[i][1]) is list:
+                self.env.assertContains(value, default_config[i][1])
+            else:
+                self.env.assertEqual(value, default_config[i][1])
+
+    def test02_config_get_invalid_name(self):
+        # Ensure that getter fails on invalid parameters appropriately
+        fake_config_name = "FAKE_CONFIG_NAME"
+
+        try:
+            self.db.config_get(fake_config_name)
+            assert(False)
+        except redis.ResponseError as e:
+            # Expecting an error.
+            assert("Unknown configuration field" in str(e))
+            pass
+
+    def test03_config_set(self):
+        config_name = "RESULTSET_SIZE"
+        config_value = 3
+
+        # Set configuration
+        response = self.db.config_set(config_name, config_value)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get(config_name)
+        expected_response = config_value
+        self.env.assertEqual(response, expected_response)
+
+        config_name = "QUERY_MEM_CAPACITY"
+        config_value = 1<<20 # 1MB
+
+        # Set configuration
+        response = self.db.config_set(config_name, config_value)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get(config_name)
+        expected_response = config_value
+        self.env.assertEqual(response, expected_response)
+
+    def test04_config_set_multi(self):
+        # Set multiple configuration values
+        response = self.redis_con.execute_command("GRAPH.CONFIG SET RESULTSET_SIZE 3 QUERY_MEM_CAPACITY 100")
+        self.env.assertEqual(response, "OK")
+
+        # Make sure both values been updated
+        names = ["RESULTSET_SIZE", "QUERY_MEM_CAPACITY"]
+        values = [3, 100]
+        for name, val in zip(names, values):
+            response = self.db.config_get(name)
+            expected_response = val
+            self.env.assertEqual(response, expected_response)
+
+    def test05_config_set_invalid_multi(self):
+        # Get current configuration
+        prev_conf = self.redis_con.execute_command("GRAPH.CONFIG GET *")
+
+        try:
+            # Set multiple configuration values, THREAD_COUNT is NOT
+            # a runtime configuration, expecting this command to fail
+            response = self.redis_con.execute_command("GRAPH.CONFIG SET QUERY_MEM_CAPACITY 150 THREAD_COUNT 40")
+            assert(False)
+        except redis.ResponseError as e:
+            # Expecting an error.
+            assert("This configuration parameter cannot be set at run-time" in str(e))
+
+        try:
+            # Set multiple configuration values, FAKE_CONFIG_NAME is NOT a valid
+            # configuration, expecting this command to fail
+            response = self.redis_con.execute_command("GRAPH.CONFIG SET QUERY_MEM_CAPACITY 150 FAKE_CONFIG_NAME 40")
+            assert(False)
+        except redis.ResponseError as e:
+            # Expecting an error.
+            assert("Unknown configuration field" in str(e))
+
+        try:
+            # Set multiple configuration values, -1 is not a valid value for
+            # MAX_QUEUED_QUERIES, expecting this command to fail
+            response = self.redis_con.execute_command("GRAPH.CONFIG SET QUERY_MEM_CAPACITY 150 MAX_QUEUED_QUERIES -1")
+            assert(False)
+        except redis.ResponseError as e:
+            # Expecting an error.
+            assert("Failed to set config value" in str(e))
+
+        # make sure configuration wasn't modified
+        current_conf = self.redis_con.execute_command("GRAPH.CONFIG GET *")
+        self.env.assertEqual(prev_conf, current_conf)
+
+    def test06_config_set_invalid_name(self):
+
+        # Ensure that setter fails on unknown configuration field
+        fake_config_name = "FAKE_CONFIG_NAME"
+
+        try:
+            self.db.config_set(fake_config_name, " 5")
+            assert(False)
+        except redis.ResponseError as e:
+            # Expecting an error.
+            assert("Unknown configuration field" in str(e))
+            pass
+
+    def test07_config_invalid_subcommand(self):
+
+        # Ensure failure on invalid sub-command, e.g. GRAPH.CONFIG DREP...
+        config_name = "RESULTSET_SIZE"
+        try:
+            response = self.redis_con.execute_command("GRAPH.CONFIG DREP " + config_name + " 3")
+            assert(False)
+        except redis.ResponseError as e:
+            assert("Unknown subcommand for GRAPH.CONFIG" in str(e))
+            pass
+
+    def test08_config_reset_to_defaults(self):
+        # Revert memory limit to default
+        response = self.db.config_set("QUERY_MEM_CAPACITY", 0)
+        self.env.assertEqual(response, "OK")
+
+        # Change timeout value from default
+        response = self.db.config_set("TIMEOUT", 5)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get("TIMEOUT")
+        expected_response = 5
+        self.env.assertEqual(response, expected_response)
+
+        # Revert timeout to unlimited
+        response = self.db.config_set("TIMEOUT", 0)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get("TIMEOUT")
+        expected_response = 0
+        self.env.assertEqual(response, expected_response)
+
+        # Change timeout_default value from default
+        response = self.db.config_set("TIMEOUT_DEFAULT", 5)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get("TIMEOUT_DEFAULT")
+        expected_response = 5
+        self.env.assertEqual(response, expected_response)
+
+        # Revert timeout_default to unlimited
+        response = self.db.config_set("TIMEOUT_DEFAULT", 0)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get("TIMEOUT_DEFAULT")
+        expected_response = 0
+        self.env.assertEqual(response, expected_response)
+
+        # Change timeout_max value from default
+        response = self.db.config_set("TIMEOUT_MAX", 5)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get("TIMEOUT_MAX")
+        expected_response = 5
+        self.env.assertEqual(response, expected_response)
+
+        # Revert timeout_max to unlimited
+        response = self.db.config_set("TIMEOUT_MAX", 0)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get("TIMEOUT_MAX")
+        expected_response = 0
+        self.env.assertEqual(response, expected_response)
+
+        # Change resultset_size from default
+        response = self.db.config_set("RESULTSET_SIZE", 2)
+        self.env.assertEqual(response, "OK")
+
+        # Validate modified resultset_size
+        result = self.graph.query("UNWIND range(1, 10) AS v RETURN v")
+        self.env.assertEqual(len(result.result_set), 2)
+
+        # Revert resultset_size to unlimited with a negative argument
+        response = self.db.config_set("RESULTSET_SIZE", -100)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure resultset_size has been updated to unlimited.
+        response = self.db.config_get("RESULTSET_SIZE")
+        expected_response = -1
+        self.env.assertEqual(response, expected_response)
+
+        response = self.db.config_get("NODE_CREATION_BUFFER")
+        expected_response = 16384
+        self.env.assertEqual(response, expected_response)
+
+        response = self.db.config_get("DELAY_INDEXING")
+        expected_response = 0
+        self.env.assertEqual(response, expected_response)
+
+        response = self.db.config_set("JS_HEAP_SIZE", 256 * 1024 * 1024)
+        self.env.assertEqual(response, "OK")
+
+        response = self.db.config_get("JS_HEAP_SIZE")
+        expected_response = 256 * 1024 * 1024
+        self.env.assertEqual(response, expected_response)
+
+        response = self.db.config_set("JS_STACK_SIZE", 1024 * 1024)
+        self.env.assertEqual(response, "OK")
+
+        response = self.db.config_get("JS_STACK_SIZE")
+        expected_response = 1024 * 1024
+        self.env.assertEqual(response, expected_response)
+
+    def test09_set_invalid_values(self):
+        # The run-time configurations supported by RedisGraph are:
+        # MAX_QUEUED_QUERIES
+        # TIMEOUT
+        # QUERY_MEM_CAPACITY
+        # DELTA_MAX_PENDING_CHANGES
+        # RESULTSET_SIZE
+
+        # Validate that attempting to set these configurations to
+        # invalid values fails
+        try:
+            # MAX_QUEUED_QUERIES must be a positive value
+            self.db.config_set("MAX_QUEUED_QUERIES", 0)
+            assert(False)
+        except redis.ResponseError as e:
+            assert("Failed to set config value MAX_QUEUED_QUERIES to 0" in str(e))
+            pass
+
+        # TIMEOUT, QUERY_MEM_CAPACITY, and DELTA_MAX_PENDING_CHANGES must be
+        # non-negative values, 0 resets to default
+        for config in ["TIMEOUT", "QUERY_MEM_CAPACITY", "DELTA_MAX_PENDING_CHANGES"]:
+            try:
+                self.db.config_set(f"{config}", -1)
+                assert(False)
+            except redis.ResponseError as e:
+                assert("Failed to set config value %s to -1" % config in str(e))
+                pass
+
+        # No configuration can be set to a string
+        for config in ["MAX_QUEUED_QUERIES", "TIMEOUT", "QUERY_MEM_CAPACITY",
+                       "DELTA_MAX_PENDING_CHANGES", "RESULTSET_SIZE"]:
+            try:
+                self.db.config_set(config, "invalid")
+                assert(False)
+            except redis.ResponseError as e:
+                assert(("Failed to set config value %s to invalid" % config) in str(e))
+
+    def test10_set_get_vkey_max_entity_count(self):
+        config_name = "VKEY_MAX_ENTITY_COUNT"
+        config_value = 100
+
+        # Set configuration
+        response = self.db.config_set(config_name, config_value)
+        self.env.assertEqual(response, "OK")
+
+        # Make sure config been updated.
+        response = self.db.config_get(config_name)
+        expected_response = config_value
+        self.env.assertEqual(response, expected_response)
+
+        # #3413: any non-negative i64 is accepted, as in C. FalkorDB Cloud loads
+        # the module with VKEY_MAX_ENTITY_COUNT 4611686000000000000, and
+        # CONFIG REWRITE saves it as a native `graph.` line; on restart Redis
+        # applies that line through the same range check `CONFIG SET` uses, so
+        # a narrower range aborted the server.
+        # 0 means no limit (one key); GRAPH.CONFIG SET already accepted it,
+        # so the native config must too, or CONFIG REWRITE saves a line the
+        # restart rejects.
+        for value in [0, 4611686000000000000, 9223372036854775807]:
+            self.env.assertEqual(self.redis_con.execute_command(
+                "CONFIG", "SET", "graph.VKEY_MAX_ENTITY_COUNT", str(value)), "OK")
+            # config_get returns a dict under both RESP2 and RESP3
+            self.env.assertEqual(
+                self.redis_con.config_get("graph.VKEY_MAX_ENTITY_COUNT"),
+                {"graph.VKEY_MAX_ENTITY_COUNT": str(value)})
+            self.env.assertEqual(self.db.config_set(config_name, value), "OK")
+            self.env.assertEqual(self.db.config_get(config_name), value)
+
+        self.env.assertEqual(self.db.config_set(config_name, 100000), "OK")
+
+    def test11_set_get_node_creation_buffer(self):
+        # flush and stop is needed for memcheck for clean shutdown
+        self.graph.delete()
+        self.env.stop()
+
+        self.env, self.db = Env(moduleArgs='NODE_CREATION_BUFFER 0')
+        self.redis_con = self.env.getConnection()
+
+        # values less than 128 (such as 0, which this module was loaded with)
+        # will be increased to 128
+        creation_buffer_size = self.db.config_get("NODE_CREATION_BUFFER")
+        expected_response =  128
+        self.env.assertEqual(creation_buffer_size, expected_response)
+
+        # restart the server with a buffer argument of 600
+        self.env, self.db = Env(moduleArgs='NODE_CREATION_BUFFER 600')
+        self.redis_con = self.env.getConnection()
+
+        # the node creation buffer should be 1024, the next-greatest power of 2 of 600
+        creation_buffer_size = self.db.config_get("NODE_CREATION_BUFFER")
+        expected_response = 1024
+        self.env.assertEqual(creation_buffer_size, expected_response)
+
+    def test12_set_get_runtime_booleans(self):
+        """CMD_INFO and DELAY_INDEXING are settable at run-time"""
+
+        for config_name in ["CMD_INFO", "DELAY_INDEXING"]:
+            for value, expected in [("no", 0), ("yes", 1), ("NO", 0), ("Yes", 1)]:
+                self.env.assertEqual(self.db.config_set(config_name, value), "OK")
+                self.env.assertEqual(self.db.config_get(config_name), expected)
+
+            # anything but yes/no is rejected,
+            # leaving the config as it was
+            for value in ["maybe", "1", "0", "true", "false"]:
+                try:
+                    self.db.config_set(config_name, value)
+                    assert(False)
+                except redis.ResponseError as e:
+                    assert(("Failed to set config value %s to %s" % (config_name, value)) in str(e))
+            self.env.assertEqual(self.db.config_get(config_name), 1)
+
+        # restore defaults for the tests that follow
+        self.db.config_set("DELAY_INDEXING", "no")
+
+    def test13_set_get_max_info_queries(self):
+        """MAX_INFO_QUERIES is settable at run-time, and clamped to its cap"""
+
+        self.env.assertEqual(self.db.config_set("MAX_INFO_QUERIES", 42), "OK")
+        self.env.assertEqual(self.db.config_get("MAX_INFO_QUERIES"), 42)
+
+        # above the cap the value is clamped, not rejected
+        self.env.assertEqual(self.db.config_set("MAX_INFO_QUERIES", 99999), "OK")
+        self.env.assertEqual(self.db.config_get("MAX_INFO_QUERIES"), 1000)
+
+        for invalid in [-1, "invalid"]:
+            try:
+                self.db.config_set("MAX_INFO_QUERIES", invalid)
+                assert(False)
+            except redis.ResponseError as e:
+                assert(("Failed to set config value MAX_INFO_QUERIES to %s" % invalid) in str(e))
+        self.env.assertEqual(self.db.config_get("MAX_INFO_QUERIES"), 1000)
+
+    def test14_config_validation(self):
+        """GRAPH.CONFIG validates values, arity and names"""
+
+        # ASYNC_DELETE defaults to yes
+        self.env.assertEqual(self.db.config_get("ASYNC_DELETE"), 1)
+
+        prev_conf = self.redis_con.execute_command("GRAPH.CONFIG GET *")
+
+        def expect_error(args, err):
+            try:
+                self.redis_con.execute_command("GRAPH.CONFIG", *args)
+                self.env.assertTrue(False, message=str(args))
+            except redis.ResponseError as e:
+                self.env.assertContains(err, str(e))
+
+        expect_error(("SET", "VKEY_MAX_ENTITY_COUNT", "-5"),
+                     "Failed to set config value VKEY_MAX_ENTITY_COUNT to -5")
+        for name in ["JS_HEAP_SIZE", "JS_STACK_SIZE"]:
+            for value in ["5", "0", "-1", "1048575", "x"]:
+                expect_error(("SET", name, value), f"{name} must be at least 1MB (1048576)")
+
+        # arity: GET takes exactly one name, SET name/value pairs
+        expect_error(("GET", "TIMEOUT", "extra"), "wrong number of arguments")
+        expect_error(("SET", "TIMEOUT"), "wrong number of arguments")
+        expect_error(("SET", "TIMEOUT", "0", "RESULTSET_SIZE"), "wrong number of arguments")
+        expect_error(("GET",), "wrong number of arguments")
+
+        # names are ASCII case-insensitive only: a dotless i does not fold to I
+        expect_error(("GET", "tımeout"), "Unknown configuration field")
+        expect_error(("SET", "tımeout", "0"), "Unknown configuration field")
+        self.env.assertEqual(self.db.config_get("timeout"), self.db.config_get("TIMEOUT"))
+
+        # nothing changed
+        self.env.assertEqual(self.redis_con.execute_command("GRAPH.CONFIG GET *"), prev_conf)
+
+import stat
+import shutil
+import tempfile
+
+class testConfigTempFolder:
+    def __init__(self):
+        self.env, self.db = Env()
+        if SANITIZER:
+            self.env.skip()
+
+    def teardown_method(self):
+        if hasattr(self, 'conn'):
+            self.conn.shutdown()
+
+    def set_temp_folder(self, path):
+        module_args = f"TEMP_FOLDER {path}"
+        self.env, self.db = Env(moduleArgs=module_args, enableDebugCommand=True)
+
+        self.conn = self.env.getConnection()
+
+    def test_01_temp_folder_is_file(self):
+        # try setting TEMP_FOLDER to a file
+        # expecting config update to fail
+        # mountable_mkstemp puts the file under the workspace so it is
+        # visible to the docker-per-class spawned container via the
+        # bind-mount logic in common._spawn_falkordb.
+        fd, file_path = mountable_mkstemp()
+        os.close(fd)
+
+        # try updating TEMP_FOLDER
+        try:
+            self.set_temp_folder(file_path)
+            # setting TEMP_FOLDER to a file should have failed
+            self.env.assertFalse(True)
+        except Exception:
+            pass
+
+    def test_02_temp_folder_not_exist(self):
+        # try setting TEMP_FOLDER to a non existing folder
+        # expecting config update to fail
+
+        # make sure path doesn't exists
+        non_existent = "/tmp/falkordb_nonexistent_dir"
+        if os.path.exists(non_existent):
+            shutil.rmtree(non_existent)
+
+        # try updating TEMP_FOLDER
+        try:
+            self.set_temp_folder(non_existent)
+            self.env.assertFalse(True)
+        except Exception:
+            pass
+
+    def test_03_temp_folder_no_permission(self):
+        # try setting TEMP_FOLDER to a folder which we can't write to
+        # expecting config update to fail, as write access is mandatory
+
+        # create a temp folder with no write access (workspace-rooted so
+        # spawned sibling containers see it via the bind-mount in common.py)
+        no_perm_dir = mountable_mkdtemp()
+        os.chmod(no_perm_dir, stat.S_IREAD)
+
+        # check if directory is truly unwritable
+        if os.access(no_perm_dir, os.W_OK):
+            env, _ = Env(enableDebugCommand=True)
+            env.skip()
+
+        # try updating TEMP_FOLDER
+        try:
+            self.set_temp_folder(no_perm_dir)
+            # setting TEMP_FOLDER to a non writeable folder should have failed
+            self.env.assertFalse(True)
+        except Exception:
+            pass
+        finally:
+            # clean up
+            os.chmod(no_perm_dir, stat.S_IWUSR | stat.S_IREAD | stat.S_IXUSR)
+            shutil.rmtree(no_perm_dir)
+
+    def test_04_temp_folder_exists_success(self):
+        # try setting TEMP_FOLDER to a valid folder
+        # expecting config update to succeed
+
+        # workspace-rooted so the spawned container can see it
+        valid_dir = mountable_mkdtemp()
+
+        try:
+            self.set_temp_folder(valid_dir)
+            self.env.assertEqual(self.db.config_get("TEMP_FOLDER"), valid_dir)
+        finally:
+            # clean up
+            shutil.rmtree(valid_dir)
+
+class testLoadTimeConfig(FlowTestsBase):
+    """
+    Test suite for validating FalkorDB load-time configuration defaults.
+
+    Inherits from FlowTestsBase to leverage shared test environment setup
+    and assertion utilities.
+    """
+
+    def __init__(self):
+        """
+        Initialize the test class.
+
+        Note: super().__init__() must be called to ensure FlowTestsBase
+        performs any required setup (e.g. connecting to the test environment).
+        """
+        super().__init__()
+
+    def test01_loadtime_config(self):
+        """
+        Verify that FalkorDB starts with the expected default configuration values.
+
+        Constructs a module argument string from the known defaults, launches
+        a FalkorDB environment with those arguments, then asserts that each
+        config key returns the expected value via `config_get`.
+
+        Defaults tested:
+            - CACHE_SIZE:              25
+            - VKEY_MAX_ENTITY_COUNT:   100000
+            - CMD_INFO:                True
+            - DELAY_INDEXING:          False
+            - IMPORT_FOLDER:           /var/lib/FalkorDB/import/
+            - TEMP_FOLDER:             /tmp
+            - JS_HEAP_SIZE:            268435456  (256 MB)
+            - JS_STACK_SIZE:           1048576    (1 MB)
+        """
+
+        defaults = [
+            ("CACHE_SIZE",            25),
+            ("VKEY_MAX_ENTITY_COUNT", 100000),
+            ("CMD_INFO",              "yes"),
+            ("DELAY_INDEXING",        "no"),
+            ("IMPORT_FOLDER",         "/var/lib/FalkorDB/import/"),
+            ("TEMP_FOLDER",           "/tmp"),
+            ("JS_HEAP_SIZE",          268435456),
+            ("JS_STACK_SIZE",         1048576),
+        ]
+
+        loadtime_args = " ".join(str(token) for pair in defaults for token in pair)
+
+        env, db = Env(moduleArgs=loadtime_args)
+
+        for name, val in defaults:
+            if val == "yes":
+                val = True
+
+            elif val == "no":
+                val = False
+
+            env.assertEqual(db.config_get(name), val)
+
+    def test02_loadtime_max_info_queries(self):
+        """MAX_INFO_QUERIES honours its load-time argument, up to the cap"""
+
+        env, db = Env(moduleArgs="MAX_INFO_QUERIES 500")
+        env.assertEqual(db.config_get("MAX_INFO_QUERIES"), 500)
+
+        # over the cap the value is clamped rather than refused
+        env, db = Env(moduleArgs="MAX_INFO_QUERIES 99999")
+        env.assertEqual(db.config_get("MAX_INFO_QUERIES"), 1000)

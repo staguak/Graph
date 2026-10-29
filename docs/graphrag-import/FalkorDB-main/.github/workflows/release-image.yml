@@ -1,0 +1,91 @@
+name: Release image
+
+# Manual escape hatch: build the runtime images FROM SOURCE at a given commit and
+# publish them under a given tag. Releases do not come through here — the
+# release pipeline (release-tag.yml) retags the rc-mg-<sha> image the merge queue
+# already validated. Use this when that image is gone (swept by
+# cleanup-rc-images.yml), when the commit never went through the queue, or to
+# publish an ad-hoc tag.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag (no v prefix). If it matches X.Y.Z it must equal Cargo.toml version."
+        required: true
+      commit_sha:
+        description: "Commit SHA to build"
+        required: true
+      mark_latest:
+        description: "Also tag :latest (moves the latest pointer — use with care)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-image-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.derive.outputs.tag }}
+    steps:
+      # Refuse a dispatch from anywhere except main or a version branch (X.Y).
+      # This guards against a dispatch from a feature branch pushing user-facing
+      # tags (latest, semver) built from un-merged code.
+      - name: Reject dispatch from non-release-bearing ref
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF_NAME" != "main" && ! "$REF_NAME" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::workflow_dispatch must run from main or a version branch (X.Y); got ref_name=$REF_NAME"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+
+      # Validate Cargo.toml only against a semver-shaped tag, so operators can
+      # still dispatch ad-hoc tags like 'edge-test' without enforcement.
+      - name: Validate tag against Cargo.toml
+        id: derive
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if echo "$TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            CARGO_VERSION=$(cargo metadata --no-deps --format-version=1 \
+              | jq -r '.packages[] | select(.name=="falkordb-rs") | .version')
+            if [ "$CARGO_VERSION" != "$TAG" ]; then
+              echo "::error::Cargo.toml version ($CARGO_VERSION) does not match tag ($TAG)"
+              exit 1
+            fi
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  # The `cells:` input describes the release matrix shape (2 archs × 2 variants).
+  build:
+    needs: prepare
+    uses: ./.github/workflows/_build-flavour.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      flavour: release
+      tag: ${{ needs.prepare.outputs.tag }}
+      commit_sha: ${{ inputs.commit_sha }}
+      cells: '[{"arch":"x64","platform":"linux/amd64","runner":"ubuntu-latest","target":"full","repo":"falkordb"},{"arch":"x64","platform":"linux/amd64","runner":"ubuntu-latest","target":"server","repo":"falkordb-server"},{"arch":"arm64v8","platform":"linux/arm64","runner":"ubuntu-24.04-arm","target":"full","repo":"falkordb"},{"arch":"arm64v8","platform":"linux/arm64","runner":"ubuntu-24.04-arm","target":"server","repo":"falkordb-server"}]'
+      browser_tag: latest
+      # Manual dispatch publishes to Docker Hub too — that's the "promote" escape hatch.
+      push_to_dockerhub: true
+      is_latest: ${{ inputs.mark_latest }}
+    # Forward DOCKER_USERNAME + DOCKER_PASSWORD (org-level secrets) to the
+    # reusable workflow's Docker Hub login.
+    secrets: inherit

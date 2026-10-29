@@ -1,0 +1,503 @@
+from common import *
+from index_utils import create_node_fulltext_index, create_node_range_index
+
+GRAPH_ID = "procedures"
+
+node1 = Node(alias="n1", labels="fruit", properties={"name": "Orange1", "value": 1})
+node2 = Node(alias="n2", labels="fruit", properties={"name": "Orange2", "value": 2})
+node3 = Node(alias="n3", labels="fruit", properties={"name": "Orange3", "value": 3})
+node4 = Node(alias="n4", labels="fruit", properties={"name": "Orange4", "value": 4})
+node5 = Node(alias="n5", labels="fruit", properties={"name": "Banana", "value": 5})
+
+
+# Tests built in procedures,
+# e.g. db.idx.fulltext.queryNodes
+# Test over all procedure behavior in addition to procedure specifics.
+class testProcedures(FlowTestsBase):
+    def __init__(self):
+        self.env, self.db = Env()
+        self.graph = self.db.select_graph(GRAPH_ID)
+        self.populate_graph()
+
+    def populate_graph(self):
+        if GRAPH_ID in self.db.list_graphs():
+            return
+
+        edge = Edge(node1, "goWellWith", node5)
+        self.graph.query(f"CREATE {node1}, {node2}, {node3}, {node4}, {node5}, {edge}")
+
+        # Create full-text index.
+        create_node_fulltext_index(self.graph, "fruit", "name", sync=True)
+
+    # Compares two nodes based on their properties.
+    def _compareNodes(self, a, b):
+        return a.properties == b.properties
+
+    # Make sure given item is found within resultset.
+    def _inResultSet(self, item, resultset):
+        for i in range(len(resultset)):
+            result = resultset[i][0]
+            if self._compareNodes(item, result):
+                return True
+        return False
+
+    # Issue query and validates resultset.
+    def queryAndValidate(self, query, expected_results, query_params={}):
+        actual_resultset = self.graph.query(query, query_params).result_set
+        self.env.assertEqual(len(actual_resultset), len(expected_results))
+        for i in range(len(actual_resultset)):
+            self.env.assertTrue(
+                self._inResultSet(expected_results[i], actual_resultset)
+            )
+
+    # Call procedure, omit yield, expecting all procedure outputs to
+    # be included in result-set.
+    def test01_no_yield(self):
+        actual_result = self.graph.call_procedure(
+            "db.idx.fulltext.queryNodes", args=["fruit", "Orange1"]
+        )
+        assert len(actual_result.result_set) == 1
+
+        header = actual_result.header
+        data = actual_result.result_set[0]
+        assert header[0][1] == "node"
+        assert data[0] is not None
+
+    # Call procedure specify different outputs.
+    def test02_yield(self):
+        actual_result = self.graph.call_procedure(
+            "db.idx.fulltext.queryNodes", args=["fruit", "Orange1"], emit=["node"]
+        )
+        assert len(actual_result.result_set) == 1
+
+        header = actual_result.header
+        data = actual_result.result_set[0]
+        assert header[0][1] == "node"
+        assert data[0] is not None
+
+        # Yield an unknown output.
+        # Expect an error when trying to use an unknown procedure output.
+        try:
+            self.graph.call_procedure(
+                "db.idx.fulltext.queryNodes",
+                args=["fruit", "Orange1"],
+                emit=["unknown"],
+            )
+            self.env.assertFalse(1)
+        except redis.ResponseError as e:
+            # Expecting an error.
+            self.env.assertContains("Procedure `db.idx.fulltext.queryNodes` does not yield output `unknown`", str(e))
+
+        # Yield the same output multiple times.
+        # Expect an error when trying to use the same output multiple times.
+        try:
+            self.graph.call_procedure(
+                "db.idx.fulltext.queryNodes",
+                args=["fruit", "Orange1"],
+                emit=["node", "node"],
+            )
+            self.env.assertFalse(1)
+        except redis.ResponseError as e:
+            # Expecting an error.
+            pass
+
+    def test03_arguments(self):
+        # Omit arguments.
+        # Expect an error when trying to omit arguments.
+        try:
+            self.graph.call_procedure("db.idx.fulltext.queryNodes")
+            self.env.assertFalse(1)
+        except redis.ResponseError:
+            # Expecting an error.
+            pass
+
+        # Omit arguments, queryNodes expecting 2 argument, provide 1.
+        # Expect an error when trying to omit arguments.
+        try:
+            self.graph.call_procedure("db.idx.fulltext.queryNodes", args=["arg1"])
+            self.env.assertFalse(1)
+        except redis.ResponseError:
+            # Expecting an error.
+            pass
+
+        # Overload arguments.
+        # Expect an error when trying to send too many arguments.
+        try:
+            self.graph.call_procedure(
+                "db.idx.fulltext.queryNodes",
+                args=["fruit", "query", "fruit", "query"],
+                emit=["node"],
+            )
+            self.env.assertFalse(1)
+        except redis.ResponseError:
+            # Expecting an error.
+            pass
+
+    # Test procedure call while mixing a number of addition clauses.
+    def test04_mix_clauses(self):
+        query_params = {"prefix": "Orange*"}
+        # CALL + RETURN.
+
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    RETURN node"""
+        expected_results = [node4, node2, node3, node1]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # The combination of CALL and WHERE currently creates a syntax error in libcypher-parser.
+        # CALL + WHERE + RETURN + ORDER.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    WHERE node.value > 2
+                    RETURN node
+                    """
+        expected_results = [node3, node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + WHERE + RETURN + ORDER + SKIP.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    WHERE node.value > 2
+                    RETURN node
+                    ORDER BY node.value
+                    SKIP 1"""
+        expected_results = [node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + WHERE + RETURN + LIMIT.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    WHERE node.value > 2
+                    RETURN node
+                    LIMIT 2"""
+        expected_results = [node3, node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + WHERE + RETURN + ORDER + SKIP + LIMIT.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    WHERE node.value > 2
+                    RETURN node
+                    ORDER BY node.value
+                    SKIP 1
+                    LIMIT 1"""
+        expected_results = [node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + RETURN + ORDER.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    RETURN node
+                    ORDER BY node.value
+                    """
+        expected_results = [node1, node2, node3, node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + RETURN + ORDER + SKIP.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    RETURN node
+                    ORDER BY node.value
+                    SKIP 1
+                    """
+        expected_results = [node2, node3, node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + RETURN + ORDER + LIMIT.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    RETURN node
+                    ORDER BY node.value
+                    LIMIT 2
+                    """
+        expected_results = [node1, node2]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + RETURN + ORDER + SKIP + LIMIT.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    RETURN node
+                    ORDER BY node.value
+                    SKIP 1
+                    LIMIT 1
+                    """
+        expected_results = [node2]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + WHERE + RETURN + ORDER.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    WHERE node.value > 2
+                    RETURN node
+                    ORDER BY node.value"""
+        expected_results = [node3, node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + WHERE + RETURN + ORDER + SKIP.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    WHERE node.value > 2
+                    RETURN node
+                    ORDER BY node.value
+                    SKIP 1"""
+        expected_results = [node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + WHERE + RETURN + ORDER + LIMIT.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    WHERE node.value > 2
+                    RETURN node
+                    ORDER BY node.value
+                    LIMIT 1"""
+        expected_results = [node3]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + WHERE + RETURN + ORDER + SKIP + LIMIT.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+                    WHERE node.value > 2
+                    RETURN node
+                    ORDER BY node.value
+                    SKIP 1
+                    LIMIT 1"""
+        expected_results = [node4]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # CALL + MATCH + RETURN.
+        query = """CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node
+            MATCH (node)-[]->(z)
+            RETURN z"""
+        expected_results = [node5]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+        # UNWIND + CALL + RETURN.
+        query = """UNWIND([1,2]) AS x CALL db.idx.fulltext.queryNodes('fruit', $prefix) YIELD node RETURN node"""
+        expected_results = [node4, node2, node3, node1, node4, node2, node3, node1]
+        self.queryAndValidate(query, expected_results, query_params=query_params)
+
+    def test05_procedure_labels(self):
+        actual_resultset = self.graph.call_procedure("db.labels").result_set
+        expected_results = [["fruit"]]
+        self.env.assertEqual(actual_resultset, expected_results)
+
+    def test06_procedure_relationshipTypes(self):
+        actual_resultset = self.graph.call_procedure("db.relationshipTypes").result_set
+        expected_results = [["goWellWith"]]
+        self.env.assertEqual(actual_resultset, expected_results)
+
+    def test07_procedure_propertyKeys(self):
+        actual_resultset = self.graph.call_procedure("db.propertyKeys").result_set
+        expected_results = [["name"], ["value"]]
+        self.env.assertEqual(actual_resultset, expected_results)
+
+    def test08_procedure_fulltext_syntax_error(self):
+        try:
+            query = """CALL db.idx.fulltext.queryNodes('fruit', 'Orange || Apple') YIELD node RETURN node"""
+            self.graph.query(query)
+            self.env.assertFalse(1)
+        except redis.ResponseError:
+            # Expecting an error.
+            pass
+
+    def test09_procedure_lookup(self):
+        try:
+            self.graph.call_procedure("dB.LaBeLS")
+        except redis.ResponseError:
+            # This should not cause an error
+            self.env.assertFalse(1)
+            pass
+
+        try:
+            # looking for a non existing procedure
+            self.graph.call_procedure("db.nonExistingProc")
+            self.env.assertFalse(1)
+        except redis.ResponseError as e:
+            # Expecting an error.
+            pass
+
+        try:
+            self.graph.call_procedure(
+                "db.IDX.FulLText.QueRyNoDes", args=["fruit", "or"]
+            )
+        except redis.ResponseError:
+            # This should not cause an error
+            self.env.assertFalse(1)
+            pass
+
+    def test10_procedure_indexes(self):
+        # Verify that the full-text index is reported properly.
+        actual_resultset = self.graph.query(
+            "CALL db.indexes() YIELD label, properties"
+        ).result_set
+        expected_results = [["fruit", ["name"]]]
+        self.env.assertEqual(actual_resultset, expected_results)
+
+        # Add an exact-match index to a different property on the same label..
+        result = create_node_range_index(
+            self.graph, "fruit", "other_property", sync=True
+        )
+        self.env.assertEqual(result.indices_created, 1)
+
+        # Verify that all indexes are reported.
+        actual_resultset = self.graph.query(
+            "CALL db.indexes() YIELD label, properties RETURN * ORDER BY properties"
+        ).result_set
+        expected_results = [["fruit", ["name", "other_property"]]]
+        self.env.assertEqual(actual_resultset, expected_results)
+
+        # Add an exact-match index to the full-text indexed property on the same label..
+        result = create_node_range_index(self.graph, "fruit", "name", sync=True)
+        self.env.assertEqual(result.indices_created, 1)
+
+        # Verify that all indexes are reported.
+        actual_resultset = self.graph.query(
+            "CALL db.indexes() YIELD label, properties RETURN * ORDER BY properties"
+        ).result_set
+        expected_results = [["fruit", ["name", "other_property"]]]
+        self.env.assertEqual(actual_resultset, expected_results)
+
+        # Validate the results when yielding only one element.
+        actual_resultset = self.graph.query("CALL db.indexes() YIELD label").result_set
+        expected_results = [["fruit"]]
+        self.env.assertEqual(actual_resultset, expected_results)
+
+    def test11_list_procedures(self):
+        # validates list of available procedures
+        actual_resultset = self.graph.query(
+            "CALL dbms.procedures() YIELD mode, name RETURN mode, name ORDER BY name"
+        ).result_set
+        expected_result = [
+            ["READ", "algo.BFS"],
+            ["READ", "algo.HarmonicCentrality"],
+            ["READ", "algo.MSF"],
+            ["READ", "algo.SPpaths"],
+            ["READ", "algo.SSpaths"],
+            ["READ", "algo.WCC"],
+            ["READ", "algo.betweenness"],
+            ["READ", "algo.labelPropagation"],
+            ["READ", "algo.maxFlow"],
+            ["READ", "algo.pageRank"],
+            ["READ", "db.constraints"],
+            ["WRITE", "db.idx.fulltext.createNodeIndex"],
+            ["WRITE", "db.idx.fulltext.drop"],
+            ["READ", "db.idx.fulltext.queryNodes"],
+            ["READ", "db.idx.fulltext.queryRelationships"],
+            ["READ", "db.idx.vector.queryNodes"],
+            ["READ", "db.idx.vector.queryRelationships"],
+            ["READ", "db.indexes"],
+            ["READ", "db.labels"],
+            ["READ", "db.meta.stats"],
+            ["READ", "db.propertyKeys"],
+            ["READ", "db.relationshipTypes"],
+            ["READ", "dbms.functions"],
+            ["READ", "dbms.procedures"],
+        ]
+        self.env.assertEqual(actual_resultset, expected_result)
+
+    def test12_list_functions(self):
+        # test the functions procedure call
+        # CALL dbms.functions()
+
+        q = """CALL dbms.functions()
+               YIELD name, return_type, arguments, internal, reducible,
+               aggregation, variable_len
+               WHERE name = $name
+               RETURN name, return_type, arguments, internal, reducible,
+                      aggregation, variable_len"""
+
+        f = self.graph.query(q, {"name": "add"}).result_set[0]
+
+        name = f[0]
+        return_type = f[1]
+        arguments = f[2]
+        internal = f[3]
+        reducible = f[4]
+        aggregation = f[5]
+        variable_len = f[6]
+
+        self.env.assertEqual(name, "add")
+        self.env.assertEqual(
+            return_type,
+            "Map, List, Datetime, Date, Time, Duration, String, Boolean, Integer, Float, or Null",
+        )
+        self.env.assertEqual(
+            arguments,
+            [
+                "Map, List, Datetime, Date, Time, Duration, String, Boolean, Integer, Float, or Null",
+                "Map, List, Datetime, Date, Time, Duration, String, Boolean, Integer, Float, or Null",
+            ],
+        )
+        self.env.assertEqual(internal, True)
+        self.env.assertEqual(reducible, True)
+        self.env.assertEqual(aggregation, False)
+        self.env.assertEqual(variable_len, False)
+
+        # -----------------------------------------------------------------------
+
+        f = self.graph.query(q, {"name": "avg"}).result_set[0]
+
+        name = f[0]
+        return_type = f[1]
+        arguments = f[2]
+        internal = f[3]
+        reducible = f[4]
+        aggregation = f[5]
+        variable_len = f[6]
+
+        self.env.assertEqual(name, "avg")
+        self.env.assertEqual(return_type, "Float or Null")
+        self.env.assertEqual(arguments, ["Integer, Float, or Null"])
+        self.env.assertEqual(internal, False)
+        self.env.assertEqual(reducible, False)
+        self.env.assertEqual(aggregation, True)
+        self.env.assertEqual(variable_len, False)
+
+        # -----------------------------------------------------------------------
+
+        f = self.graph.query(q, {"name": "case"}).result_set[0]
+
+        name = f[0]
+        return_type = f[1]
+        arguments = f[2]
+        internal = f[3]
+        reducible = f[4]
+        aggregation = f[5]
+        variable_len = f[6]
+
+        self.env.assertEqual(name, "case")
+        self.env.assertEqual(
+            return_type,
+            "Map, Node, Edge, List, Path, Datetime, Date, Time, Duration, String, Boolean, Integer, Float, Null, Pointer, Point, or Vectorf32",
+        )
+        self.env.assertEqual(
+            arguments,
+            [
+                "Map, Node, Edge, List, Path, Datetime, Date, Time, Duration, String, Boolean, Integer, Float, Null, Pointer, Point, or Vectorf32"
+            ],
+        )
+        self.env.assertEqual(internal, True)
+        self.env.assertEqual(reducible, True)
+        self.env.assertEqual(aggregation, False)
+        self.env.assertEqual(variable_len, True)
+
+    def test13_clauses_after_call_are_validated(self):
+        # the clauses that follow a procedure call get the same checks as
+        # anywhere else; a trailing MATCH used to crash the server
+        # https://github.com/FalkorDB/FalkorDB/issues/3279
+        g = self.db.select_graph("validate_after_call")
+        g.query("CREATE (:N)")
+
+        queries = [
+            ("CALL db.labels() YIELD label MATCH (n)",
+             "Query cannot conclude with MATCH"),
+            ("CALL db.labels() YIELD label WITH label MATCH (n)",
+             "Query cannot conclude with MATCH"),
+            ("CALL db.labels() YIELD label OPTIONAL MATCH (n)",
+             "Query cannot conclude with MATCH"),
+            ("CALL db.labels() YIELD label UNWIND [1] AS x",
+             "Query cannot conclude with UNWIND"),
+            ("CALL db.labels() YIELD label CREATE (a)-[:R|S]->(b)",
+             "Exactly one relationship type must be specified for each relation in a CREATE pattern"),
+            ("CALL db.labels() YIELD label MERGE (a)-[:R|S]->(b)",
+             "Exactly one relationship type must be specified for each relation in a MERGE pattern"),
+        ]
+        for query, error in queries:
+            try:
+                g.query(query)
+                self.env.assertTrue(False, message=query)
+            except redis.ResponseError as e:
+                self.env.assertContains(error, str(e))
+
+        # nothing was created, and valid queries after a CALL still run
+        self.env.assertEqual(g.query("MATCH ()-[r]->() RETURN count(r)").result_set, [[0]])
+        result = g.query("CALL db.labels() YIELD label MATCH (n) RETURN label, labels(n)")
+        self.env.assertEqual(result.result_set, [['N', ['N']]])
+        g.delete()
